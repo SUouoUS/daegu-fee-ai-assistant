@@ -1,1 +1,10 @@
+# 가상환경
+myenv/
+.venv/
 
+# Python
+__pycache__/
+*.py[cod]
+
+# 환경 변수
+.env
