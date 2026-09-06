@@ -4,14 +4,57 @@ app.py
 기능 검증용 최소 화면. UI 디자인은 이후 단계에서 담당.
 """
 
+import datetime
 import hashlib
+import sqlite3
 
 import streamlit as st
 from services.parser import extract_text_from_pdf, normalize_notice_text, pdf_info
 from services.extractor import extract_notice_info
+from services.assistant import (
+    EXAMPLE_QUESTIONS,
+    MAX_QUESTION_LENGTH,
+    answer_notice_question,
+)
+from database.db import (
+    get_nearest_upcoming_notice,
+    get_notice,
+    init_db,
+    list_notices,
+    save_notice,
+)
 
 # ── 페이지 설정 ──────────────────────────────────────────────
 st.set_page_config(page_title="고지서 AI 비서", page_icon="📄")
+
+
+# ── DB 초기화 (앱 시작 시 1회) ───────────────────────────────
+@st.cache_resource
+def _init_db_once() -> dict:
+    """notices 테이블을 준비한다. 실패는 숨기지 않고 그대로 보고한다."""
+    try:
+        init_db()
+        return {"ok": True, "error": None}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+_db_state = _init_db_once()
+DB_READY = _db_state["ok"]
+if not DB_READY:
+    st.error(
+        "데이터베이스를 초기화할 수 없어 저장·조회 기능을 사용할 수 없습니다. "
+        f"(원인: {_db_state['error']})"
+    )
+
+
+# ── 표시용 헬퍼 ──────────────────────────────────────────────
+def _fmt_amount(amount, fallback: str) -> str:
+    return f"{amount:,}원" if amount is not None else fallback
+
+
+def _fmt_text(value, fallback: str) -> str:
+    return value if value else fallback
 
 # ── session_state 초기화 ─────────────────────────────────────
 _DEFAULTS = {
@@ -23,10 +66,27 @@ _DEFAULTS = {
     "pdf_password": None,       # 인증된 비밀번호 (세션 메모리에서만)
     "pdf_page_count": None,     # 전체 페이지 수
     "pdf_page_num": 1,          # 선택된 페이지 번호 (1-based)
+    "saved_notice_id": None,    # 현재 분석 결과의 DB 저장 id (중복 저장 방지)
 }
 for key, default in _DEFAULTS.items():
     if key not in st.session_state:
         st.session_state[key] = default
+
+# AI 비서 상태는 PDF/분석 결과 초기화와 무관하게 현재 세션에서 유지한다.
+_ASSISTANT_DEFAULTS = {
+    "assistant_open": False,        # AI 비서 영역 열림 여부
+    "assistant_question": None,     # 마지막으로 질문한 문장
+    "assistant_answer": None,       # 마지막 답변
+    "assistant_error": None,        # 마지막 오류 메시지
+}
+for key, default in _ASSISTANT_DEFAULTS.items():
+    if key not in st.session_state:
+        st.session_state[key] = default
+
+
+def _clear_assistant_error():
+    """질문을 수정하면 이전 오류 메시지를 제거한다."""
+    st.session_state["assistant_error"] = None
 
 
 def _clear_all():
@@ -36,15 +96,17 @@ def _clear_all():
 
 
 def _clear_result():
-    """텍스트 직접 입력 변경 시 결과만 초기화."""
+    """텍스트 직접 입력 변경 시 결과만 초기화. (DB 데이터는 삭제하지 않음)"""
     st.session_state["notice_text"] = ""
     st.session_state["notice_info"] = None
+    st.session_state["saved_notice_id"] = None
 
 
 def _on_page_change():
     """분석 페이지 변경 시 이전 결과만 초기화 (인증 상태 유지)."""
     st.session_state["notice_text"] = ""
     st.session_state["notice_info"] = None
+    st.session_state["saved_notice_id"] = None
 
 
 def _get_file_id(uploaded_file) -> str:
@@ -57,6 +119,28 @@ def _get_file_id(uploaded_file) -> str:
 # ── 헤더 ─────────────────────────────────────────────────────
 st.title("고지서 AI 비서")
 st.write("고지서 PDF를 올리거나 내용을 직접 입력해 주세요.")
+
+# ── 다가오는 납부기한 ────────────────────────────────────────
+if DB_READY:
+    st.subheader("다가오는 납부기한")
+    try:
+        today_str = datetime.date.today().isoformat()
+        upcoming = get_nearest_upcoming_notice(today_str)
+    except (ValueError, sqlite3.Error) as e:
+        upcoming = None
+        st.error(f"납부기한을 조회할 수 없습니다. (원인: {e})")
+    else:
+        if upcoming is None:
+            st.info("다가오는 납부기한이 없습니다.")
+        else:
+            col1, col2, col3 = st.columns(3)
+            col1.metric("고지서명", _fmt_text(upcoming["title"], "고지서명 미확인"))
+            col2.metric("금액", _fmt_amount(upcoming["amount"], "금액 미확인"))
+            col3.metric(
+                "납부기한", _fmt_text(upcoming["due_date"], "납부기한 미확인")
+            )
+
+st.divider()
 
 # ── 입력 방식 선택 ───────────────────────────────────────────
 MAX_FILE_SIZE_MB = 10
@@ -179,6 +263,8 @@ if input_method == "PDF 업로드":
         # 텍스트 확인 버튼
         if st.button("텍스트 확인"):
             st.session_state["notice_text"] = ""
+            st.session_state["notice_info"] = None
+            st.session_state["saved_notice_id"] = None
             file_bytes = uploaded_file.getvalue()
             page_index = st.session_state["pdf_page_num"] - 1
             pw = st.session_state["pdf_password"]
@@ -211,6 +297,8 @@ else:  # 텍스트 직접 입력
 
     if st.button("텍스트 확인"):
         st.session_state["notice_text"] = ""
+        st.session_state["notice_info"] = None
+        st.session_state["saved_notice_id"] = None
         stripped = raw_text.strip()
         if not stripped:
             st.warning("고지서 내용을 입력해 주세요.")
@@ -236,6 +324,7 @@ if st.session_state["notice_text"]:
     
     if st.button("AI로 고지서 분석"):
         st.session_state["notice_info"] = None
+        st.session_state["saved_notice_id"] = None
         with st.spinner("AI가 고지서 정보를 분석 중입니다..."):
             try:
                 info = extract_notice_info(st.session_state["notice_text"])
@@ -268,4 +357,142 @@ if st.session_state["notice_info"]:
         st.info(f"다음 항목은 확인되지 않았습니다: {', '.join(missing_fields)}")
 
     st.json(st.session_state["notice_info"])
+
+    # ── 저장 ─────────────────────────────────────────────────
+    if DB_READY:
+        already_saved = st.session_state["saved_notice_id"] is not None
+        if st.button("고지서 저장", disabled=already_saved):
+            try:
+                new_id = save_notice(st.session_state["notice_info"])
+            except ValueError as e:
+                st.error(f"저장할 수 없습니다. (원인: {e})")
+            except sqlite3.Error as e:
+                st.error(f"데이터베이스 저장에 실패했습니다. (원인: {e})")
+            else:
+                st.session_state["saved_notice_id"] = new_id
+                st.rerun()
+        if already_saved:
+            st.success("저장 완료")
+
+# ── 저장된 고지서 ────────────────────────────────────────────
+if DB_READY:
+    st.divider()
+    st.subheader("저장된 고지서")
+
+    try:
+        notices = list_notices()
+    except sqlite3.Error as e:
+        notices = None
+        st.error(f"저장된 고지서를 불러올 수 없습니다. (원인: {e})")
+
+    if notices is not None:
+        if not notices:
+            st.info("아직 저장된 고지서가 없습니다. AI 분석 후 '고지서 저장'을 눌러 주세요.")
+        else:
+            # 목록 표 (id, 생성 시각은 표시하지 않음)
+            st.dataframe(
+                [
+                    {
+                        "고지서명": _fmt_text(n["title"], "고지서명 미확인"),
+                        "금액": _fmt_amount(n["amount"], "금액 미확인"),
+                        "납부기한": _fmt_text(n["due_date"], "납부기한 미확인"),
+                        "상태": n["status"],
+                    }
+                    for n in notices
+                ],
+                hide_index=True,
+                width="stretch",
+            )
+
+            # ── 상세 조회 ────────────────────────────────────
+            st.markdown("**상세 정보 보기**")
+            options = list(range(len(notices)))
+
+            def _option_label(idx: int) -> str:
+                n = notices[idx]
+                title = _fmt_text(n["title"], "고지서명 미확인")
+                due = _fmt_text(n["due_date"], "납부기한 미확인")
+                return f"{title} · {due}"
+
+            selected_idx = st.selectbox(
+                "고지서를 선택하세요",
+                options,
+                format_func=_option_label,
+            )
+
+            try:
+                detail = get_notice(notices[selected_idx]["id"])
+            except sqlite3.Error as e:
+                detail = None
+                st.error(f"상세 정보를 불러올 수 없습니다. (원인: {e})")
+
+            if detail is None:
+                st.info("선택한 고지서를 찾을 수 없습니다.")
+            else:
+                NOT_FOUND = "확인되지 않음"
+                st.write(f"**고지서명:** {_fmt_text(detail['title'], NOT_FOUND)}")
+                st.write(f"**발급 기관:** {_fmt_text(detail['agency'], NOT_FOUND)}")
+                st.write(f"**금액:** {_fmt_amount(detail['amount'], NOT_FOUND)}")
+                st.write(f"**납부기한:** {_fmt_text(detail['due_date'], NOT_FOUND)}")
+                st.write(
+                    f"**납부방법:** {_fmt_text(detail['payment_method'], NOT_FOUND)}"
+                )
+                st.write(f"**상태:** {detail['status']}")
+                if detail["status"] == "미납":
+                    st.caption(
+                        "초기 관리 상태이며 실제 납부 여부 확인 결과가 아닙니다."
+                    )
+
+# ── AI 비서 ──────────────────────────────────────────────────
+# 기능 검증용 최소 UI. 디자인은 이후 단계에서 담당.
+if DB_READY:
+    st.divider()
+    st.subheader("AI 비서")
+
+    toggle_label = "AI 비서 닫기" if st.session_state["assistant_open"] else "AI 비서 열기"
+    if st.button(toggle_label, key="assistant_toggle"):
+        st.session_state["assistant_open"] = not st.session_state["assistant_open"]
+        st.rerun()
+
+    if st.session_state["assistant_open"]:
+        st.caption("답변은 저장된 고지서 정보를 기준으로 제공됩니다.")
+        st.caption(
+            "법률·행정 판단, 실제 납부 가능 여부, 납부 완료 처리는 제공하지 않습니다."
+        )
+        st.caption("질문만 Gemini API로 전송되며, 저장된 고지서 데이터는 전송하지 않습니다.")
+
+        question = st.text_input(
+            "질문을 입력하세요",
+            key="assistant_question_input",
+            max_chars=MAX_QUESTION_LENGTH,
+            on_change=_clear_assistant_error,
+        )
+
+        # 버튼을 누를 때만 Gemini API를 호출한다. (일반 재실행으로 재전송하지 않음)
+        if st.button("질문하기", key="assistant_ask"):
+            st.session_state["assistant_error"] = None
+            st.session_state["assistant_answer"] = None
+            with st.spinner("AI 비서가 답변을 준비 중입니다…"):
+                try:
+                    answer = answer_notice_question(question)
+                except ValueError as e:
+                    st.session_state["assistant_error"] = str(e)
+                except Exception:
+                    st.session_state["assistant_error"] = (
+                        "알 수 없는 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."
+                    )
+                else:
+                    st.session_state["assistant_question"] = question.strip()
+                    st.session_state["assistant_answer"] = answer
+
+        if st.session_state["assistant_error"]:
+            st.error(st.session_state["assistant_error"])
+
+        if st.session_state["assistant_answer"]:
+            st.markdown(f"**질문:** {st.session_state['assistant_question']}")
+            st.info(st.session_state["assistant_answer"])
+
+        st.caption("사용 예시")
+        for example in EXAMPLE_QUESTIONS:
+            st.caption(f"- {example}")
 

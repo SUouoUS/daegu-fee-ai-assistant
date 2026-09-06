@@ -3,11 +3,17 @@ services/extractor.py
 고지서 텍스트에서 주요 정보를 추출하는 모듈.
 Gemini API를 사용하여 구조화된 정보를 파싱한다.
 """
-import os
 import json
 import datetime
-from dotenv import load_dotenv
 from pydantic import BaseModel, ValidationError
+
+from services import gemini_client
+from services.gemini_client import (  # 재시도 정책은 gemini_client와 공유
+    MAX_ATTEMPTS,
+    RETRY_EXP_BASE,
+    RETRY_INITIAL_DELAY,
+    TRANSIENT_STATUS_CODES,
+)
 
 # Pydantic 모델
 class NoticeInfoSchema(BaseModel):
@@ -18,6 +24,9 @@ class NoticeInfoSchema(BaseModel):
     payment_method: str | None
 
 MAX_TEXT_LENGTH = 20000
+
+# 재시도 후에도 실패한 일시적 오류에 사용할 안내 문구
+BUSY_MESSAGE = "현재 AI 서버가 혼잡합니다. 잠시 후 다시 분석해 주세요."
 
 def extract_notice_info(notice_text: str) -> dict:
     """고지서 텍스트에서 핵심 정보를 추출한다.
@@ -44,24 +53,11 @@ def extract_notice_info(notice_text: str) -> dict:
     if len(notice_text) > MAX_TEXT_LENGTH:
         raise ValueError(f"입력 텍스트가 너무 깁니다. (최대 {MAX_TEXT_LENGTH}자)")
 
-    load_dotenv(override=False)
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        raise ValueError(
-            "GEMINI_API_KEY가 설정되지 않았습니다. "
-            "AI 정보 추출 기능을 사용하려면 .env 파일에 API 키를 추가해 주세요."
-        )
+    api_key = gemini_client.load_api_key("AI 정보 추출")
+    model_id = gemini_client.get_model_id()
 
-    model_id = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
-
-    try:
-        from google import genai
-        from google.genai import types
-        from google.genai.errors import APIError
-    except ImportError:
-        raise ValueError("google-genai 패키지가 설치되지 않았습니다.")
-
-    client = genai.Client(api_key=api_key)
+    _, types, APIError, httpx = gemini_client.import_sdk()
+    client = gemini_client.create_client(api_key)
 
     system_instruction = (
         "당신의 역할은 제공된 고지서 텍스트에서 명시된 핵심 정보를 추출하는 것입니다. "
@@ -94,17 +90,12 @@ def extract_notice_info(notice_text: str) -> dict:
             ),
         )
     except APIError as e:
-        err_msg = str(e).lower()
-        # 오류 메시지에 키나 본문 등 민감정보가 노출되지 않도록, e.message를 제한적으로 활용
-        e_msg = getattr(e, 'message', '')
-        if e.code in (401, 403) or "api key" in err_msg:
-            raise ValueError("API 인증에 실패했습니다. 유효한 API 키인지 확인해 주세요.")
-        elif e.code == 429 or "quota" in err_msg:
-            raise ValueError("API 사용량이 초과되었거나 요청이 제한되었습니다.")
-        elif e.code == 404 or "not found" in err_msg:
-            raise ValueError(f"모델({model_id})을 찾을 수 없거나 접근이 제한되었습니다. (원인: {e_msg})")
-        else:
-            raise ValueError(f"API 연결 실패 또는 모델에서 오류가 발생했습니다. (원인: {e_msg})")
+        gemini_client.raise_for_api_error(
+            e, model_id=model_id, busy_message=BUSY_MESSAGE
+        )
+    except (httpx.TimeoutException, httpx.ConnectError):
+        # 연결 실패·타임아웃도 일시적 오류로 보고 재시도 후 실패한 경우
+        raise gemini_client.GeminiBusyError(BUSY_MESSAGE)
     except Exception as e:
         raise ValueError("API 요청 중 연결 실패 또는 시간 초과가 발생했습니다.")
 

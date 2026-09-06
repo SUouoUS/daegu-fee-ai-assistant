@@ -8,3 +8,8 @@ __pycache__/
 
 # 환경 변수
 .env
+
+# 데이터베이스 (data/sample/ 하위 파일은 무시되지 않음)
+data/*.db
+data/*.sqlite
+data/*.sqlite3
