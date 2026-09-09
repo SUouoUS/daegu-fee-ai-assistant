@@ -1,1 +1,1 @@
-"""database 패키지."""
+# database package

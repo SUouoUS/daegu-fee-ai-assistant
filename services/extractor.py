@@ -41,7 +41,6 @@ def extract_notice_info(notice_text: str) -> dict:
             "amount": int | None,
             "due_date": str | None,
             "payment_method": str | None,
-            "status": "미납"
         }
 
     Raises:
@@ -125,6 +124,4 @@ def extract_notice_info(notice_text: str) -> dict:
     if all(v is None for v in result_dict.values()):
         raise ValueError("고지서에서 핵심 정보를 찾을 수 없습니다.")
 
-    result_dict["status"] = "미납"
-    
     return result_dict

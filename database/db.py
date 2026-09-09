@@ -1,219 +1,324 @@
 """
 database/db.py
-고지서 정보를 SQLite에 저장하고 조회하는 모듈.
-표준 라이브러리 sqlite3만 사용하며, ORM은 사용하지 않는다.
+SQLite 기반 고지서 데이터 관리 모듈.
 
-저장하는 정보: 고지서명, 발급 기관, 금액, 납부기한, 납부방법, 상태, 생성 시각
-저장하지 않는 정보: PDF 원본, notice_text, PDF 비밀번호, API 키
+bills 테이블:
+- id, title, agency, amount, due_date, payment_method
+- status ('미납' / '납부완료'), paid_at (납부 시점), created_at (저장 시점)
 """
 
-import datetime
 import sqlite3
-from pathlib import Path
+import datetime
+import os
 
-# 프로젝트 루트/data/notices.db (테스트에서는 이 값을 임시 경로로 교체)
-DB_PATH = Path(__file__).resolve().parent.parent / "data" / "notices.db"
-
-TABLE_NAME = "notices"
-
-_CREATE_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS notices (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT NULL,
-    agency TEXT NULL,
-    amount INTEGER NULL,
-    due_date TEXT NULL,
-    payment_method TEXT NULL,
-    status TEXT NOT NULL,
-    created_at TEXT NOT NULL
-)
-"""
-
-_SELECT_COLUMNS = "id, title, agency, amount, due_date, payment_method, status, created_at"
-
-DEFAULT_STATUS = "미납"
+# DB 파일 경로: 프로젝트 루트의 data/bills.db
+_DB_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
+_DB_PATH = os.path.join(_DB_DIR, "bills.db")
 
 
-# ── 내부 헬퍼 ────────────────────────────────────────────────
-def _connect() -> sqlite3.Connection:
-    """DB 폴더를 보장한 뒤 커넥션을 반환한다."""
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(DB_PATH)
+def _get_connection() -> sqlite3.Connection:
+    """SQLite 연결을 반환한다. Row를 dict처럼 접근 가능하게 설정."""
+    os.makedirs(_DB_DIR, exist_ok=True)
+    conn = sqlite3.connect(_DB_PATH)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
     return conn
 
 
-def _validate_amount(value) -> int | None:
-    """amount는 None 또는 0 이상의 int만 허용한다. (bool은 거절)"""
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        raise ValueError("amount에 bool 값은 사용할 수 없습니다.")
-    if not isinstance(value, int):
-        raise ValueError("amount는 None 또는 정수여야 합니다.")
-    if value < 0:
-        raise ValueError("amount는 0 이상이어야 합니다.")
-    return value
-
-
-def _validate_date(value, field_name: str = "due_date") -> str | None:
-    """None 또는 실제 존재하는 YYYY-MM-DD 문자열만 허용한다."""
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        raise ValueError(f"{field_name}는 None 또는 YYYY-MM-DD 문자열이어야 합니다.")
-    if len(value) != 10 or value[4] != "-" or value[7] != "-":
-        raise ValueError(f"{field_name} 형식이 올바르지 않습니다. (YYYY-MM-DD)")
-    try:
-        datetime.date.fromisoformat(value)
-    except ValueError:
-        raise ValueError(f"{field_name}가 존재하지 않는 날짜입니다.")
-    return value
-
-
-def _validate_text(value, field_name: str) -> str | None:
-    """None 또는 문자열만 허용하고, 공백만 있으면 None으로 정규화한다."""
-    if value is None:
-        return None
-    if not isinstance(value, str):
-        raise ValueError(f"{field_name}는 None 또는 문자열이어야 합니다.")
-    stripped = value.strip()
-    return stripped or None
-
-
-def _validate_status(value) -> str:
-    """status는 NOT NULL이므로 비어 있으면 기본값을 사용한다."""
-    if value is None:
-        return DEFAULT_STATUS
-    if not isinstance(value, str):
-        raise ValueError("status는 문자열이어야 합니다.")
-    return value.strip() or DEFAULT_STATUS
-
-
-# ── 공개 함수 ────────────────────────────────────────────────
 def init_db() -> None:
-    """notices 테이블이 없으면 생성한다. (여러 번 호출해도 안전)"""
-    with _connect() as conn:
-        conn.execute(_CREATE_TABLE_SQL)
-
-
-def save_notice(notice_info: dict) -> int:
-    """추출된 고지서 정보를 저장하고 생성된 id를 반환한다.
-
-    Args:
-        notice_info: title/agency/amount/due_date/payment_method/status 키를 갖는 dict.
-
-    Returns:
-        저장된 행의 id.
-
-    Raises:
-        ValueError: 입력 값 검증 실패.
-        sqlite3.Error: DB 오류 (숨기지 않고 그대로 전파).
+    """bills 테이블을 생성한다. 이미 존재하면 무시.
+    기존 테이블에 status/paid_at 컬럼이 없으면 마이그레이션도 수행.
     """
-    if not isinstance(notice_info, dict):
-        raise ValueError("notice_info는 dict여야 합니다.")
+    conn = _get_connection()
+    try:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS bills (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                title           TEXT,
+                agency          TEXT,
+                amount          INTEGER,
+                due_date        TEXT,
+                payment_method  TEXT,
+                status          TEXT NOT NULL DEFAULT '미납',
+                paid_at         TEXT,
+                created_at      TEXT NOT NULL
+            )
+        """)
+        conn.commit()
 
-    title = _validate_text(notice_info.get("title"), "title")
-    agency = _validate_text(notice_info.get("agency"), "agency")
-    amount = _validate_amount(notice_info.get("amount"))
-    due_date = _validate_date(notice_info.get("due_date"))
-    payment_method = _validate_text(notice_info.get("payment_method"), "payment_method")
-    status = _validate_status(notice_info.get("status"))
+        # 마이그레이션: 기존 테이블에 컬럼이 없는 경우 추가
+        _migrate_if_needed(conn)
+    finally:
+        conn.close()
 
-    # 실행 환경의 시간대에 영향받지 않도록 UTC로 기록한다.
-    created_at = datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds")
 
-    with _connect() as conn:
-        cur = conn.execute(
-            "INSERT INTO notices "
-            "(title, agency, amount, due_date, payment_method, status, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (title, agency, amount, due_date, payment_method, status, created_at),
+def _migrate_if_needed(conn: sqlite3.Connection) -> None:
+    """기존 bills 테이블에 status·paid_at 컬럼이 없으면 추가하고,
+    기존 row의 status를 '미납'으로 설정한다.
+    """
+    cursor = conn.execute("PRAGMA table_info(bills)")
+    columns = {row["name"] for row in cursor.fetchall()}
+
+    if "status" not in columns:
+        conn.execute(
+            "ALTER TABLE bills ADD COLUMN status TEXT NOT NULL DEFAULT '미납'"
         )
-        notice_id = cur.lastrowid
+        conn.execute("UPDATE bills SET status = '미납' WHERE status IS NULL")
+        conn.commit()
 
-    return int(notice_id)
-
-
-def list_notices() -> list[dict]:
-    """저장된 고지서 전체를 반환한다.
-
-    정렬: 납부기한 오름차순 → 기한 없는 항목은 마지막 → 같은 기한이면 최근 저장 순.
-    """
-    with _connect() as conn:
-        rows = conn.execute(
-            f"SELECT {_SELECT_COLUMNS} FROM notices "
-            "ORDER BY (due_date IS NULL) ASC, due_date ASC, id DESC"
-        ).fetchall()
-
-    return [dict(row) for row in rows]
+    if "paid_at" not in columns:
+        conn.execute("ALTER TABLE bills ADD COLUMN paid_at TEXT")
+        conn.commit()
 
 
-def get_notice(notice_id: int) -> dict | None:
-    """id로 고지서 1건을 조회한다. 없으면 None."""
-    if isinstance(notice_id, bool) or not isinstance(notice_id, int):
-        raise ValueError("notice_id는 정수여야 합니다.")
-
-    with _connect() as conn:
-        row = conn.execute(
-            f"SELECT {_SELECT_COLUMNS} FROM notices WHERE id = ?",
-            (notice_id,),
-        ).fetchone()
-
-    return dict(row) if row is not None else None
+# ── 저장 ──────────────────────────────────────────────────────
 
 
-def list_unpaid_notices_due_between(start_date: str, end_date: str) -> list[dict]:
-    """지정 기간(양끝 포함)에 납부기한이 있는 '미납' 고지서를 기한 오름차순으로 반환한다.
+def save_bill(info: dict) -> int:
+    """고지서 정보를 DB에 저장하고 생성된 id를 반환한다.
 
     Args:
-        start_date: 시작일 (YYYY-MM-DD).
-        end_date: 종료일 (YYYY-MM-DD).
-
-    Raises:
-        ValueError: 날짜 형식이 올바르지 않거나 시작일이 종료일보다 늦은 경우.
-    """
-    if start_date is None or end_date is None:
-        raise ValueError("start_date와 end_date는 YYYY-MM-DD 문자열이어야 합니다.")
-    start_date = _validate_date(start_date, "start_date")
-    end_date = _validate_date(end_date, "end_date")
-    if start_date > end_date:
-        raise ValueError("start_date는 end_date보다 늦을 수 없습니다.")
-
-    with _connect() as conn:
-        rows = conn.execute(
-            f"SELECT {_SELECT_COLUMNS} FROM notices "
-            "WHERE status = ? AND due_date IS NOT NULL "
-            "AND due_date >= ? AND due_date <= ? "
-            "ORDER BY due_date ASC, id DESC",
-            (DEFAULT_STATUS, start_date, end_date),
-        ).fetchall()
-
-    return [dict(row) for row in rows]
-
-
-def get_nearest_upcoming_notice(today: str) -> dict | None:
-    """오늘 또는 그 이후 기한을 가진 '미납' 고지서 중 가장 가까운 1건을 반환한다.
-
-    Args:
-        today: 기준일 (YYYY-MM-DD).
+        info: extract_notice_info()가 반환하는 dict.
+              필수 키는 없으며, 누락된 필드는 NULL로 저장.
 
     Returns:
-        해당 고지서 dict 또는 None.
-
-    Raises:
-        ValueError: today가 올바른 날짜 문자열이 아닌 경우.
+        생성된 bill의 id (정수).
     """
-    if today is None:
-        raise ValueError("today는 YYYY-MM-DD 문자열이어야 합니다.")
-    today = _validate_date(today, "today")
+    now = datetime.datetime.now().isoformat(timespec="seconds")
+    conn = _get_connection()
+    try:
+        cursor = conn.execute(
+            """
+            INSERT INTO bills (title, agency, amount, due_date,
+                               payment_method, status, created_at)
+            VALUES (?, ?, ?, ?, ?, '미납', ?)
+            """,
+            (
+                info.get("title"),
+                info.get("agency"),
+                info.get("amount"),
+                info.get("due_date"),
+                info.get("payment_method"),
+                now,
+            ),
+        )
+        conn.commit()
+        return cursor.lastrowid
+    finally:
+        conn.close()
 
-    with _connect() as conn:
+
+# ── 조회 ──────────────────────────────────────────────────────
+
+
+def _status_filter(include_paid: bool) -> str:
+    """WHERE 절에 추가할 status 필터 SQL 조각을 반환한다."""
+    if include_paid:
+        return "1=1"  # 모든 상태
+    return "status = '미납'"
+
+
+def get_bills(include_paid: bool = False) -> list[dict]:
+    """저장된 고지서 목록을 반환한다.
+
+    Args:
+        include_paid: True이면 납부완료 고지서도 포함. 기본 False(미납만).
+
+    Returns:
+        dict 리스트. 각 dict는 bills 테이블의 한 행.
+    """
+    conn = _get_connection()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM bills
+            WHERE {_status_filter(include_paid)}
+            ORDER BY
+                CASE WHEN due_date IS NOT NULL THEN 0 ELSE 1 END,
+                due_date ASC,
+                created_at DESC
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def get_bills_due_this_week(include_paid: bool = False) -> list[dict]:
+    """이번 주(월~일) 납부 기한인 고지서를 반환한다."""
+    today = datetime.date.today()
+    # 월요일 = 0
+    monday = today - datetime.timedelta(days=today.weekday())
+    sunday = monday + datetime.timedelta(days=6)
+
+    conn = _get_connection()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM bills
+            WHERE {_status_filter(include_paid)}
+              AND due_date IS NOT NULL
+              AND due_date >= ?
+              AND due_date <= ?
+            ORDER BY due_date ASC
+            """,
+            (monday.isoformat(), sunday.isoformat()),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def get_bills_due_this_month(include_paid: bool = False) -> list[dict]:
+    """이번 달 납부 기한인 고지서를 반환한다."""
+    today = datetime.date.today()
+    first_day = today.replace(day=1)
+    # 다음 달 1일 - 1일 = 이번 달 마지막 날
+    if today.month == 12:
+        last_day = today.replace(year=today.year + 1, month=1, day=1) - datetime.timedelta(days=1)
+    else:
+        last_day = today.replace(month=today.month + 1, day=1) - datetime.timedelta(days=1)
+
+    conn = _get_connection()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT * FROM bills
+            WHERE {_status_filter(include_paid)}
+              AND due_date IS NOT NULL
+              AND due_date >= ?
+              AND due_date <= ?
+            ORDER BY due_date ASC
+            """,
+            (first_day.isoformat(), last_day.isoformat()),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def get_total_amount_this_month(include_paid: bool = False) -> int:
+    """이번 달 납부 예정 총 금액을 반환한다."""
+    bills = get_bills_due_this_month(include_paid=include_paid)
+    return sum(b["amount"] for b in bills if b.get("amount") is not None)
+
+
+def get_nearest_due_bill(include_paid: bool = False) -> dict | None:
+    """오늘 이후 가장 가까운 납부 기한의 고지서를 반환한다.
+    없으면 None.
+    """
+    today = datetime.date.today().isoformat()
+    conn = _get_connection()
+    try:
         row = conn.execute(
-            f"SELECT {_SELECT_COLUMNS} FROM notices "
-            "WHERE status = ? AND due_date IS NOT NULL AND due_date >= ? "
-            "ORDER BY due_date ASC, id DESC LIMIT 1",
-            (DEFAULT_STATUS, today),
+            f"""
+            SELECT * FROM bills
+            WHERE {_status_filter(include_paid)}
+              AND due_date IS NOT NULL
+              AND due_date >= ?
+            ORDER BY due_date ASC
+            LIMIT 1
+            """,
+            (today,),
         ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
 
-    return dict(row) if row is not None else None
+
+# ── 상태 변경 ─────────────────────────────────────────────────
+
+
+def mark_as_paid(bill_id: int) -> bool:
+    """고지서를 납부완료로 표시한다.
+
+    이미 납부완료 상태이면 에러 없이 True를 반환 (idempotent).
+
+    Args:
+        bill_id: 대상 고지서의 id.
+
+    Returns:
+        True: 성공 (상태 변경 또는 이미 납부완료).
+        False: 해당 id가 존재하지 않음.
+    """
+    now = datetime.datetime.now().isoformat(timespec="seconds")
+    conn = _get_connection()
+    try:
+        # 존재 여부 확인
+        row = conn.execute(
+            "SELECT id, status FROM bills WHERE id = ?", (bill_id,)
+        ).fetchone()
+        if row is None:
+            return False
+
+        if row["status"] == "납부완료":
+            return True  # 이미 납부완료 — idempotent
+
+        conn.execute(
+            """
+            UPDATE bills
+            SET status = '납부완료', paid_at = ?
+            WHERE id = ?
+            """,
+            (now, bill_id),
+        )
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def mark_as_unpaid(bill_id: int) -> bool:
+    """고지서를 미납으로 되돌린다.
+
+    이미 미납 상태이면 에러 없이 True를 반환 (idempotent).
+
+    Args:
+        bill_id: 대상 고지서의 id.
+
+    Returns:
+        True: 성공 (상태 변경 또는 이미 미납).
+        False: 해당 id가 존재하지 않음.
+    """
+    conn = _get_connection()
+    try:
+        row = conn.execute(
+            "SELECT id, status FROM bills WHERE id = ?", (bill_id,)
+        ).fetchone()
+        if row is None:
+            return False
+
+        if row["status"] == "미납":
+            return True  # 이미 미납 — idempotent
+
+        conn.execute(
+            """
+            UPDATE bills
+            SET status = '미납', paid_at = NULL
+            WHERE id = ?
+            """,
+            (bill_id,),
+        )
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+# ── 삭제 ──────────────────────────────────────────────────────
+
+
+def delete_bill(bill_id: int) -> bool:
+    """고지서를 삭제한다.
+
+    Returns:
+        True: 삭제 성공.
+        False: 해당 id가 존재하지 않음.
+    """
+    conn = _get_connection()
+    try:
+        cursor = conn.execute("DELETE FROM bills WHERE id = ?", (bill_id,))
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
