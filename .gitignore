@@ -1,5 +1,6 @@
 # 가상환경
 myenv/
+.myenv/
 .venv/
 
 # Python
@@ -13,3 +14,7 @@ __pycache__/
 data/*.db
 data/*.sqlite
 data/*.sqlite3
+
+# SQLite WAL 모드 부속 파일
+data/*.db-wal
+data/*.db-shm
