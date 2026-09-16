@@ -18,6 +18,14 @@ _project_root = os.path.dirname(os.path.abspath(__file__))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
+# Windows 기본 콘솔(cp949)에는 이모지가 없다. 출력 인코딩 오류 때문에
+# 테스트가 중단되지 않도록 출력 실패만 대체 문자로 넘긴다.
+try:
+    sys.stdout.reconfigure(errors="replace")
+    sys.stderr.reconfigure(errors="replace")
+except (AttributeError, OSError):
+    pass
+
 # 테스트용 DB 경로 설정 (실제 DB와 분리)
 _TEST_DB_PATH = os.path.join(_project_root, "data", "test_bills.db")
 

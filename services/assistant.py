@@ -2,21 +2,26 @@
 services/assistant.py
 AI 비서 — 자연어 질문 → 의도 분류 → DB 조회 → 답변 생성.
 
-모든 DB 조회는 status='미납' 고지서만 대상으로 한다.
+일정·합계 의도(this_week/this_month/monthly_total/nearest_due/list_all)의 DB 조회는
+status='미납' 고지서만 대상으로 한다. 반면 사용자가 목록에서 직접 선택한 고지서
+한 건에 대한 질문(bill_* 의도)은 납부완료 고지서도 답변 대상이다.
 
 [외부 전송 범위]
 Gemini API를 호출하는 지점은 _classify_intent() 하나뿐이며, 전송하는 내용은
-사용자가 입력한 질문 텍스트뿐이다. DB 조회·금액 합산·날짜 계산·답변 문장 생성은
-모두 로컬에서 수행하므로 고지서명·발급 기관·금액·납부기한·납부방법은
-외부로 전송되지 않는다. (test_assistant_no_bill_data.py에서 검증)
+사용자가 입력한 질문 텍스트와 정적인 분류 지침뿐이다. DB 조회·금액 합산·날짜 계산·
+답변 문장 생성은 모두 로컬에서 수행하므로 고지서명·발급 기관·금액·납부기한·납부방법은
+외부로 전송되지 않는다. 선택한 고지서의 id조차 전송하지 않으며, 이 모듈이 id로
+DB를 다시 읽는다. (test_assistant_no_bill_data.py에서 검증)
 """
 
 import json
+import re
 import datetime
 
 from services import gemini_client
 from database.db import (
     get_bills,
+    get_bill_by_id,
     get_bills_due_this_week,
     get_bills_due_this_month,
     get_total_amount_this_month,
@@ -27,19 +32,47 @@ from database.db import (
 # ── 의도 분류 스키마 ──────────────────────────────────────────
 
 _INTENT_LABELS = {
-    "this_week": "이번 주 납부 기한 고지서 조회",
-    "this_month": "이번 달 납부 기한 고지서 조회",
-    "monthly_total": "이번 달 총 납부 예정 금액",
-    "nearest_due": "가장 가까운 납부 기한 고지서",
-    "list_all": "미납 고지서 전체 목록",
+    # 일정·합계 (미납 고지서만 조회)
+    "this_week": "이번 주 납부 기한 고지서 조회 (예: '이번 주에 낼 게 있어?')",
+    "this_month": "이번 달 납부 기한 고지서 조회 (예: '이번 달에 납부할 고지서 보여줘')",
+    "monthly_total": "이번 달 총 납부 예정 금액 (예: '이번 달 미납 합계가 얼마야?')",
+    "nearest_due": "가장 가까운 납부 기한 고지서 (예: '제일 급한 게 뭐야?')",
+    "list_all": "미납 고지서 전체 목록 (예: '안 낸 거 전부 보여줘')",
+    # 사용자가 선택한 고지서 한 건 (납부완료 고지서도 대상)
+    "bill_summary": (
+        "선택한 고지서 한 건의 전체 요약 "
+        "(예: '이 고지서 요약해 줘', '이거 어떤 고지서야?')"
+    ),
+    "bill_due": (
+        "선택한 고지서의 납부 기한이 '언제'인지 "
+        "(예: '이거 언제까지 내야 해?', '납부기한이 며칠이야?')"
+    ),
+    "bill_amount": (
+        "선택한 고지서의 납부 금액이 '얼마'인지 "
+        "(예: '금액이 얼마야?', '이거 얼마 내야 해?')"
+    ),
+    "bill_payment": (
+        "선택한 고지서의 납부 방법·납부 수단 "
+        "(예: '납부 방법은?', '어떻게 내면 돼?')"
+    ),
+    "bill_obligation": (
+        "선택한 고지서를 꼭 내야 하는지·안 내도 되는지 묻는 납부 의무 판단 요청 "
+        "(예: '이 고지서 꼭 내야 해?', '안 내도 돼?', '이거 면제 안 되나?')"
+    ),
     "unknown": "고지서와 관련 없는 질문 또는 파악 불가",
 }
+
+# 선택한 고지서 한 건을 대상으로 하는 의도.
+_BILL_INTENTS = frozenset(
+    {"bill_summary", "bill_due", "bill_amount", "bill_payment", "bill_obligation"}
+)
 
 
 _UNKNOWN_ANSWER = (
     "죄송합니다, 고지서 관련 질문만 답변할 수 있습니다. "
     "예를 들어 '이번 주에 낼 게 있어?', '이번 달 납부 금액은?', "
-    "'가장 가까운 납부기한은?' 등으로 질문해 주세요."
+    "'가장 가까운 납부기한은?' 등으로 질문해 주세요. "
+    "고지서를 선택한 뒤 '이 고지서 요약해 줘'처럼 물어볼 수도 있습니다."
 )
 
 # 목록형 의도(this_week/this_month/list_all)의 첫 문장과 빈 결과 문구.
@@ -57,6 +90,78 @@ _EMPTY_MESSAGES = {
 
 # 재시도 후에도 실패한 일시적 오류에 사용할 안내 문구
 BUSY_MESSAGE = "현재 AI 서버가 혼잡합니다. 잠시 후 다시 질문해 주세요."
+
+# ── 선택한 고지서 관련 고정 문구 ─────────────────────────────
+
+# 납부 의무는 저장된 정보로 판단할 수 없다. 이 문구는 한 줄로 그대로 사용한다.
+OBLIGATION_ANSWER = (
+    "저장된 정보만으로 납부 의무를 판단할 수 없습니다. 발급 기관에 확인해 주세요."
+)
+
+NO_SELECTION_ANSWER = (
+    "어떤 고지서에 대한 질문인지 알 수 없습니다. "
+    "목록에서 고지서를 먼저 선택한 뒤 다시 질문해 주세요."
+)
+
+MISSING_BILL_ANSWER = (
+    "선택한 고지서를 찾을 수 없습니다. 삭제되었을 수 있으니 "
+    "목록에서 다시 선택해 주세요."
+)
+
+_UNKNOWN_FIELD = "확인되지 않음"
+
+
+# ── 납부 의무 질문 로컬 보정 ──────────────────────────────────
+# 의도 분류는 확률적이므로, 납부 의무를 묻는 대표적인 표현은 로컬에서 한 번 더
+# 확인해 고정 안내로 처리한다. Gemini 호출이 끝난 뒤에 도는 순수 로컬 판정이라
+# API 호출 횟수나 전송 내용에는 영향이 없다.
+#
+# 한계: 정규식은 아래 표현과 그 변형만 잡는다. 모든 자연어 표현을 판별하지 못한다.
+
+_OBLIGATION_RE = re.compile(
+    r"(꼭\s*내야|반드시\s*내야|꼭\s*납부|무조건\s*내야"
+    r"|안\s*내도\s*(되|돼|됨|될)|내지\s*않아도\s*(되|돼|됨|될)"
+    r"|안\s*내면\s*(어떻게|어떻|되)|납부\s*안\s*해도|납부하지\s*않아도"
+    r"|납부\s*의무|내야\s*하(나|는지|나요|냐)|면제\s*(되|받|돼|대상))"
+)
+
+# '이 고지서'처럼 한 건을 가리키는 표현. '하는 거'의 '거'와 겹치지 않도록
+# '이거/이것/이건'만 지시 표현으로 본다.
+_BILL_SCOPE_RE = re.compile(
+    r"(이\s*고지서|그\s*고지서|해당\s*고지서|선택(한|된)|이거|이건|이것)"
+)
+
+# '이번 달에 꼭 내야 하는 거 있어?'처럼 기간·목록을 묻는 일정 질문의 표지.
+# 이 표현이 있으면 의무 질문으로 보정하지 않는다.
+_SCHEDULE_SCOPE_RE = re.compile(
+    r"(이번\s*주|이번\s*달|다음\s*주|다음\s*달|이달|금주|금월"
+    r"|전체|전부|모두|모든|목록|리스트|합계|총액|몇\s*건)"
+)
+
+
+def _apply_local_overrides(question: str, intent: str) -> str:
+    """분류 결과를 로컬에서 한 번 보정한다. (외부 호출 없음)
+
+    '안 내도 돼?'처럼 명확한 납부 의무 질문이 bill_due나 unknown으로 분류되어도
+    고정 안내로 처리되도록 bill_obligation으로 교정한다. 다만
+    '이번 달에 꼭 내야 하는 거 있어?' 같은 일정 질문은 교정하지 않는다.
+
+    Returns:
+        교정된 의도 키. 해당 없으면 입력 intent 그대로.
+    """
+    if not _OBLIGATION_RE.search(question):
+        return intent
+
+    # '이 고지서'처럼 한 건을 가리키면 기간 표현이 섞여 있어도 의무 질문으로 본다.
+    if intent in _BILL_INTENTS or _BILL_SCOPE_RE.search(question):
+        return "bill_obligation"
+
+    # 지시 표현이 없더라도 기간·목록 표지가 없으면 의무 질문으로 본다.
+    # ('안 내도 돼?'가 unknown으로 분류되는 경우를 여기서 건진다.)
+    if not _SCHEDULE_SCOPE_RE.search(question):
+        return "bill_obligation"
+
+    return intent
 
 
 def _classify_intent(question: str) -> str:
@@ -85,11 +190,23 @@ def _classify_intent(question: str) -> str:
         f"- {key}: {desc}" for key, desc in _INTENT_LABELS.items()
     )
 
+    # 아래 지침은 전부 정적이다. DB 조회 결과·선택한 고지서의 id나 이름·
+    # 대화 기록·PDF 원문을 여기에 넣어서는 안 된다.
     system_instruction = (
         "당신은 고지서 관리 시스템의 의도 분류기입니다.\n"
         "사용자의 질문을 읽고, 아래 의도 중 하나를 선택하세요.\n"
         "반드시 JSON 형식으로 intent 키만 반환하세요.\n\n"
         f"[의도 목록]\n{intent_descriptions}\n\n"
+        "[분류 규칙]\n"
+        "- bill_due는 '언제', '며칠까지', '기한', '마감'처럼 시점을 묻는 경우에만 고릅니다.\n"
+        "- '꼭 내야 해?', '안 내도 돼?', '납부 의무가 있어?', '면제 안 되나?'처럼\n"
+        "  납부를 해야 하는지 여부를 묻는 경우는 bill_due가 아니라 bill_obligation입니다.\n"
+        "- '이 고지서', '이거', '해당 고지서', '선택한 고지서'처럼 한 건을 가리키는\n"
+        "  표현이 있으면 bill_ 로 시작하는 의도를 우선합니다.\n"
+        "- '납부 방법은?', '금액이 얼마야?'처럼 대상이 생략된 짧은 질문도\n"
+        "  선택한 고지서에 대한 질문으로 보고 bill_ 의도를 고릅니다.\n"
+        "- '이번 주', '이번 달', '전체 목록'처럼 기간이나 여러 건을 묻는 질문은\n"
+        "  bill_ 의도가 아니라 일정·합계 의도입니다.\n\n"
         "[출력 형식]\n"
         '{"intent": "의도_키"}'
     )
@@ -125,11 +242,26 @@ def _classify_intent(question: str) -> str:
     return "unknown"
 
 
-def _query_data(intent: str) -> dict:
+def _query_data(intent: str, selected_bill_id=None) -> dict:
     """의도에 맞는 DB 조회를 수행하고 결과를 dict로 반환한다.
 
-    모든 조회는 include_paid=False (미납 고지서만 대상).
+    일정·합계 의도의 조회는 기존과 동일하게 include_paid=False (미납만)이다.
+    선택한 고지서 한 건을 묻는 bill_* 의도는 id로 직접 조회하며, 이때는
+    납부완료 고지서도 대상이다.
+
+    Args:
+        intent: 분류된 의도 키.
+        selected_bill_id: UI에서 선택된 고지서의 id. bill_* 의도에서만 사용한다.
     """
+    if intent in _BILL_INTENTS:
+        # 선택하지 않았다면 임의의 고지서로 답하지 않는다.
+        if selected_bill_id is None:
+            return {"intent": intent, "bill": None, "selection": "none"}
+        bill = get_bill_by_id(selected_bill_id)
+        if bill is None:
+            return {"intent": intent, "bill": None, "selection": "missing"}
+        return {"intent": intent, "bill": bill, "selection": "ok"}
+
     if intent == "this_week":
         bills = get_bills_due_this_week(include_paid=False)
         return {"intent": intent, "bills": bills, "count": len(bills)}
@@ -162,6 +294,19 @@ def _generate_answer(intent: str, data: dict) -> str:
     """
     if intent == "unknown":
         return _UNKNOWN_ANSWER
+
+    if intent in _BILL_INTENTS:
+        selection = data.get("selection")
+        if selection == "missing":
+            return MISSING_BILL_ANSWER
+        if selection == "none":
+            if intent == "bill_obligation":
+                # 의무 판단 거절은 어떤 고지서든 동일하므로 안내는 하되,
+                # 임의의 고지서를 대상으로 삼지 않았음을 분명히 한다.
+                return f"{OBLIGATION_ANSWER}\n{NO_SELECTION_ANSWER}"
+            return NO_SELECTION_ANSWER
+        return _compose_bill_answer(intent, data["bill"])
+
     return _compose_answer(intent, data)
 
 
@@ -196,6 +341,106 @@ def _days_left(due_date: str):
     except (TypeError, ValueError):
         return None
     return (due - datetime.date.today()).days
+
+
+# ── 선택한 고지서 한 건 답변 (로컬 전용) ─────────────────────
+
+
+def _bill_name(bill: dict) -> str:
+    """답변에 쓸 고지서 이름. 대화 기록에서 대상이 섞이지 않도록 항상 붙인다."""
+    return bill.get("title") or "제목 없는 고지서"
+
+
+def _status_label(bill: dict) -> str:
+    """관리 상태 문구. 실제 납부 여부가 아니라 사용자가 관리하는 표시다."""
+    return bill.get("status") or "미납"
+
+
+def _due_phrase(bill: dict) -> str:
+    """납부기한과 남은 일수를 한 구절로 만든다. 기한이 없으면 '확인되지 않음'."""
+    due = bill.get("due_date")
+    if not due:
+        return _UNKNOWN_FIELD
+
+    remaining = _days_left(due)
+    if remaining is None:
+        return due
+    if remaining == 0:
+        return f"{due} (오늘 마감)"
+    if remaining > 0:
+        return f"{due} ({remaining}일 남음)"
+    return f"{due} (기한이 {abs(remaining)}일 지났습니다)"
+
+
+def _payment_guidance(bill: dict) -> str:
+    """납부방법이 없을 때의 안내.
+
+    계좌번호·납부 링크·세부 절차는 만들어내지 않고, 확인할 곳만 알려준다.
+    """
+    agency = bill.get("agency")
+    if agency:
+        return f"납부 방법이 저장되어 있지 않습니다. 발급 기관({agency})에 확인해 주세요."
+    return (
+        "납부 방법과 발급 기관이 모두 저장되어 있지 않습니다. "
+        "고지서 원문을 확인해 주세요."
+    )
+
+
+def _compose_bill_answer(intent: str, bill: dict) -> str:
+    """선택한 고지서 한 건에 대한 답변을 조립한다. (저장된 정보만 사용)"""
+    name = _bill_name(bill)
+    amount = bill.get("amount")
+    agency = bill.get("agency")
+    due = bill.get("due_date")
+    method = bill.get("payment_method")
+
+    if intent == "bill_obligation":
+        lines = [f"'{name}'에 대한 답변입니다.", OBLIGATION_ANSWER]
+        if agency:
+            lines.append(f"(발급 기관: {agency})")
+        return "\n".join(lines)
+
+    if intent == "bill_amount":
+        lines = [f"'{name}'의 납부 금액은 {_format_amount(amount)}입니다."]
+        if amount is None:
+            lines.append("저장된 금액이 없습니다. 고지서 원문을 확인해 주세요.")
+        return "\n".join(lines)
+
+    if intent == "bill_due":
+        if due:
+            lines = [f"'{name}'의 납부 기한은 {_due_phrase(bill)}입니다."]
+        else:
+            lines = [
+                f"'{name}'의 납부 기한은 {_UNKNOWN_FIELD}입니다.",
+                "고지서 원문을 확인해 주세요.",
+            ]
+        if _status_label(bill) == "납부완료":
+            lines.append(
+                "이 고지서는 납부완료로 표시되어 있습니다. "
+                "(실제 납부 여부가 아니라 사용자가 관리하는 표시입니다.)"
+            )
+        return "\n".join(lines)
+
+    if intent == "bill_payment":
+        if method:
+            return f"'{name}'의 납부 방법은 {method}입니다."
+        return f"'{name}' — {_payment_guidance(bill)}"
+
+    # bill_summary
+    lines = [
+        f"'{name}' 정보입니다.",
+        f"• 발급 기관: {agency or _UNKNOWN_FIELD}",
+        f"• 납부 금액: {_format_amount(amount)}",
+        f"• 납부 기한: {_due_phrase(bill)}",
+        f"• 납부 방법: {method or _UNKNOWN_FIELD}",
+        f"• 관리 상태: {_status_label(bill)}",
+    ]
+    if not method:
+        lines.append(_payment_guidance(bill))
+    lines.append(
+        "※ 관리 상태는 사용자가 표시한 값이며 실제 납부 여부 확인 결과가 아닙니다."
+    )
+    return "\n".join(lines)
 
 
 def _compose_answer(intent: str, data: dict) -> str:
@@ -245,21 +490,29 @@ def _compose_answer(intent: str, data: dict) -> str:
 # ── 공개 인터페이스 ───────────────────────────────────────────
 
 
-def ask(question: str) -> str:
+def ask(question: str, *, selected_bill_id=None) -> str:
     """사용자 질문에 대한 AI 비서 답변을 반환한다.
 
-    흐름: 질문 → 의도 분류 → DB 조회(미납만) → 답변 생성
+    흐름: 질문 → 의도 분류(Gemini 1회) → 로컬 보정 → DB 조회 → 답변 생성
 
     Args:
         question: 사용자의 자연어 질문.
+        selected_bill_id: UI에서 선택된 고지서의 id. **id만** 전달받으며,
+            고지서 내용은 이 함수가 DB에서 직접 다시 읽는다. Gemini로는
+            전송되지 않는다. 선택하지 않았으면 None.
 
     Returns:
         AI 비서의 답변 문자열.
+
+    Raises:
+        GeminiError: API 키 누락, 인증 실패, 모델 없음, 사용량 초과 등.
+        GeminiBusyError: 재시도 후에도 계속된 혼잡·타임아웃·연결 실패.
     """
     if not question or not question.strip():
         return "질문을 입력해 주세요."
 
     intent = _classify_intent(question)
-    data = _query_data(intent)
+    intent = _apply_local_overrides(question, intent)
+    data = _query_data(intent, selected_bill_id=selected_bill_id)
     answer = _generate_answer(intent, data)
     return answer

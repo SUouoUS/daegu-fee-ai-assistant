@@ -33,11 +33,14 @@ html, body {
   background-color: var(--bg-main) !important;
 }
 
-/* 메인 컨테이너 최대 폭 설정 및 중앙 정렬 */
+/* 메인 컨테이너 최대 폭 설정 및 중앙 정렬
+   Streamlit 1.63은 .main 대신 stMainBlockContainer를 사용한다.
+   구버전 선택자도 함께 남겨 둔다. */
+[data-testid="stMainBlockContainer"],
 .main .block-container {
-  max-width: 1120px !important;
-  padding-top: 2rem !important;
-  padding-bottom: 3rem !important;
+  max-width: 1200px !important;
+  padding-top: 1.75rem !important;
+  padding-bottom: 2.5rem !important;
   margin: 0 auto !important;
 }
 
@@ -48,7 +51,41 @@ div[data-testid="stVerticalBlockBorderWrapper"] {
   border-radius: var(--radius-card) !important;
   box-shadow: var(--shadow-subtle) !important;
   padding: 16px !important;
-  margin-bottom: 32px !important;
+  margin-bottom: 20px !important;
+}
+
+/* ── 대시보드 2열 레이아웃 ─────────────────────────────────
+   가로 비율(70% / 30%)과 줄바꿈 금지는 app.py의
+   st.columns([7, 3], wrap=False)가 정한다. CSS로 위치를 옮기지 않는다.
+
+   Streamlit 1.63은 각 열에 width/flex-basis를 퍼센트로 주지만 min-width는
+   지정하지 않는다(wrap=True일 때). 그러면 flex 항목의 기본값 min-width:auto가
+   적용되어, 열 안의 내용이 넓으면 열이 자기 비율보다 커지고 flex-wrap:wrap과
+   맞물려 오른쪽 열이 아래 줄로 밀려난다. min-width를 0으로 풀어 이를 막는다.
+
+   :has()로 dash_left/dash_right를 담은 열만 고르므로 목록 안의 중첩 열은
+   영향을 받지 않는다. */
+div[data-testid="stColumn"]:has(.st-key-dash_left),
+div[data-testid="stColumn"]:has(.st-key-dash_right) {
+  min-width: 0 !important;
+}
+
+/* 1024px 이하에서는 실제로 1열로 쌓는다. (내용을 잘라 숨기지 않는다)
+   wrap=False로 꺼 둔 줄바꿈을 이 구간에서만 다시 켠다. */
+@media (max-width: 1024px) {
+  div[data-testid="stHorizontalBlock"]:has(.st-key-dash_right) {
+    flex-wrap: wrap !important;
+  }
+  div[data-testid="stColumn"]:has(.st-key-dash_left),
+  div[data-testid="stColumn"]:has(.st-key-dash_right) {
+    flex: 1 1 100% !important;
+    width: 100% !important;
+    max-width: 100% !important;
+  }
+  /* 목록 아래로 내려온 비서 패널이 위 카드와 붙지 않도록 한다. */
+  .st-key-dash_right {
+    margin-top: 4px;
+  }
 }
 
 /* 탭 스타일 */
@@ -157,13 +194,116 @@ div[data-testid="stVerticalBlockBorderWrapper"] {
   margin: 4px 0 0 0;
 }
 
-.dashboard-card {
+/* ── 카드 (실제 st.container에 key로 지정) ───────────────── */
+.st-key-bill_list_card,
+.st-key-bill_detail_card,
+.st-key-ai_panel {
   background-color: var(--bg-card);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-card);
-  padding: 20px;
-  margin-bottom: 32px;
-  box-shadow: var(--shadow-subtle);
+  padding: 14px 16px;
+  box-shadow: none;
+  margin-bottom: 20px;
+}
+
+/* ── 고지서 목록 (4열) ───────────────────────────────────── */
+.bill-list-header {
+  display: grid;
+  grid-template-columns: 3fr 2fr 1fr 1fr;
+  gap: 8px;
+  padding: 8px 12px;
+  background-color: #F8FAFC;
+  border-radius: 6px;
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--text-sub);
+  align-items: center;
+}
+
+/* grid 항목도 기본 min-width:auto라서 내용이 열을 밀어낼 수 있다. */
+.bill-list-header > div {
+  min-width: 0;
+  word-break: keep-all;
+}
+
+/* 행 구분선. bill_row_ 와 bill_row_sel_ 모두에 적용된다. */
+div[class*="st-key-bill_row_"] {
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+/* 선택된 행 강조. 다른 고지서를 선택하면 key 접두사가 바뀌므로
+   이전 행의 강조는 자동으로 해제된다. */
+div[class*="st-key-bill_row_sel_"] {
+  background-color: #F0F5FF;
+  border-left: 3px solid var(--primary-color);
+  border-radius: 4px;
+}
+
+.card-section-count {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-sub);
+}
+
+.detail-footnote {
+  margin-top: 14px;
+  font-size: 13px;
+  color: var(--text-sub);
+}
+
+/* ── AI 비서 패널 ────────────────────────────────────────── */
+.ai-panel-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--primary-color);
+  margin: 0 0 2px 0;
+}
+
+.ai-target {
+  font-size: 13px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  margin: 8px 0 10px 0;
+  line-height: 1.4;
+  word-break: keep-all;
+}
+
+.ai-target-on {
+  background-color: #F0F5FF;
+  color: var(--primary-color);
+  font-weight: 600;
+  border: 1px solid #DBE4F5;
+}
+
+.ai-target-off {
+  background-color: #F8FAFC;
+  color: var(--text-sub);
+  border: 1px solid var(--border-color);
+}
+
+.st-key-ai_history {
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  padding: 6px 8px;
+  background-color: #FCFCFD;
+  margin-bottom: 10px;
+}
+
+.st-key-ai_panel div[data-testid="stChatMessage"] {
+  padding: 4px 6px;
+  background-color: transparent;
+}
+
+.st-key-ai_panel .stButton > button {
+  min-height: 32px !important;
+  font-size: 13px !important;
+  padding: 0 8px !important;
+  box-shadow: none !important;
+}
+
+.st-key-ai_ex_wide {
+  margin-top: 6px;
 }
 
 .nearest-card {
@@ -266,4 +406,35 @@ div[data-testid="stVerticalBlockBorderWrapper"] {
   font-size: 15px;
   font-weight: 500;
   color: var(--text-main);
+}
+
+/* ── 좁은 화면 보정 (가로 스크롤 없이 1열로) ───────────── */
+@media (max-width: 640px) {
+  /* 4열 헤더는 좁은 화면에서 의미가 없으므로 숨긴다.
+     행 자체는 Streamlit이 1열로 쌓아 전부 보인다. */
+  .st-key-bill_list_header {
+    display: none;
+  }
+
+  .detail-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .nearest-card {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 10px;
+  }
+
+  .nearest-details {
+    text-align: left;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  [data-testid="stMainBlockContainer"],
+  .main .block-container {
+    padding-left: 1rem !important;
+    padding-right: 1rem !important;
+  }
 }

@@ -144,6 +144,33 @@ def get_bills(include_paid: bool = False) -> list[dict]:
         conn.close()
 
 
+def get_bill_by_id(bill_id) -> dict | None:
+    """id로 고지서 한 건을 조회한다. (읽기 전용)
+
+    납부완료 고지서도 상세 질문에 답할 수 있어야 하므로, 다른 조회 함수와 달리
+    include_paid 필터를 두지 않는다. 상태와 무관하게 해당 id의 행을 반환한다.
+
+    Args:
+        bill_id: 조회할 고지서 id. int로 해석할 수 없는 값이면 None을 반환한다.
+
+    Returns:
+        해당 행의 dict. 없거나 id가 유효하지 않으면 None.
+    """
+    try:
+        bill_id = int(bill_id)
+    except (TypeError, ValueError):
+        return None
+
+    conn = _get_connection()
+    try:
+        row = conn.execute(
+            "SELECT * FROM bills WHERE id = ?", (bill_id,)
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
 def get_bills_due_this_week(include_paid: bool = False) -> list[dict]:
     """이번 주(월~일) 납부 기한인 고지서를 반환한다."""
     today = datetime.date.today()
