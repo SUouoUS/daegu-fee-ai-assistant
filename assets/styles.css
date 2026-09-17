@@ -1,168 +1,135 @@
 /* assets/styles.css */
-/* 차분하고 정돈된 공공 서비스 스타일 */
+/* 차분하고 정돈된 업무용 서비스 스타일
+ *
+ * 원칙
+ * - 카드·영역 스타일은 st.container(key=...)가 만드는 .st-key-* 클래스로 범위를 제한한다.
+ *   (Streamlit 1.63에서는 key 클래스와 border=True 테두리가 같은 stVerticalBlock 요소에 붙는다)
+ * - 이 <style>은 본문에 들어가 Streamlit(emotion)이 head에 넣는 스타일보다 뒤에 온다.
+ *   명시도가 같으면 이 파일이 이기므로 !important를 쓰지 않는다.
+ * - 폰트는 .stApp에만 지정한다. 전역(*) 강제는 아이콘 글꼴을 깨뜨린다.
+ */
 
 :root {
-  --bg-main: #F7F8FA;
+  --bg-main: #F5F6F8;
   --bg-card: #FFFFFF;
+  --bg-subtle: #F8FAFC;
   --text-main: #182230;
-  --text-sub: #667085;
+  --text-sub: #5B6576;
+  --text-disabled: #98A2B3;
   --primary-color: #1F4E79;
   --primary-hover: #16395B;
-  --accent-blue: #2563EB;
+  --primary-soft: #EEF3FA;
   --border-color: #E4E7EC;
-  --danger-color: #D92D20;
-  --warning-color: #B54708;
-  --success-color: #067647;
   --font-family: Pretendard, "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
   --radius-card: 8px;
-  --radius-button: 8px;
-  --shadow-subtle: 0 1px 2px rgba(16, 24, 40, 0.03);
+  --radius-control: 8px;
+  --card-padding: 20px;
+  --section-gap: 20px;
+  --header-height: 3.75rem; /* Streamlit 1.63 상단 도구 영역(stHeader) 높이 */
 }
 
-/* 전체 폰트 및 배경 적용 */
-html, body {
+/* ── 전체 ─────────────────────────────────────────────────── */
+.stApp {
+  font-family: var(--font-family);
+  background-color: var(--bg-main);
+}
+
+/* 상단 도구 영역은 유지하고 배경만 본문과 맞춘다. */
+[data-testid="stHeader"] {
+  background-color: var(--bg-main);
+}
+
+/* 본문 폭 1200px, 중앙 정렬.
+   상단 도구 영역(stHeader)은 position:fixed라 본문 흐름에서 빠져 있다.
+   padding-top을 그 높이보다 작게 두면 제목·버튼이 도구 영역 아래에 가려진다.
+   도구 영역 높이 + 28px로 시작 위치를 잡는다. */
+[data-testid="stMainBlockContainer"] {
+  max-width: calc(1200px + 48px);
+  padding: calc(var(--header-height) + 28px) 24px 48px;
+  margin: 0 auto;
+}
+
+/* 이 스타일시트를 주입한 빈 마크다운 요소. 높이는 0이지만 본문 첫 자식이라
+   flex gap(16px)만큼 제목을 아래로 민다. 내용이 없는 요소이므로 흐름에서 뺀다.
+   (display:none 안의 <style>도 그대로 적용된다) */
+[data-testid="stMainBlockContainer"] > [data-testid="stVerticalBlock"] > [data-testid="stElementContainer"]:has(> [data-testid="stMarkdown"] style) {
+  display: none;
+}
+
+/* Streamlit은 마크다운 문단(p)의 아래 여백을 상쇄하려고 stMarkdownContainer에
+   margin-bottom:-1rem을 준다. app.py가 직접 만든 HTML 블록(div 등)에는 그 여백이
+   없어서 다음 요소와 16px 겹친다. 이런 블록을 담은 컨테이너만 상쇄를 해제한다. */
+[data-testid="stMarkdownContainer"]:has(
+  > .gov-header-left,
+  > .nearest-card,
+  > .card-section-title,
+  > .bill-list-header,
+  > .detail-header,
+  > .detail-grid,
+  > .detail-footnote,
+  > .empty-title,
+  > .ai-panel-title,
+  > .ai-target,
+  > .ai-target-empty,
+  .register-desc
+) {
+  margin-bottom: 0;
+}
+
+/* 등록 화면은 폭을 약 760px로 줄인다. */
+[data-testid="stMainBlockContainer"]:has(.st-key-register_card) {
+  max-width: calc(760px + 48px);
+}
+
+/* ── 버튼 ─────────────────────────────────────────────────── */
+.stButton > button {
+  min-height: 40px;
+  padding: 0 16px;
+  border-radius: var(--radius-control);
+  font-size: 14px;
+  font-weight: 600;
+  box-shadow: none;
+}
+
+.stButton > button[data-testid="stBaseButton-secondary"] {
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-color);
   color: var(--text-main);
 }
 
-.stApp {
-  font-family: var(--font-family);
-  background-color: var(--bg-main) !important;
+.stButton > button[data-testid="stBaseButton-secondary"]:hover {
+  border-color: var(--primary-color);
+  color: var(--primary-color);
 }
 
-.stApp {
-  background-color: var(--bg-main) !important;
+.stButton > button[data-testid="stBaseButton-primary"],
+.stButton > button[data-testid="stBaseButton-primary"]:active {
+  background-color: var(--primary-color);
+  border: 1px solid var(--primary-color);
+  color: #FFFFFF;
 }
 
-/* 메인 컨테이너 최대 폭 설정 및 중앙 정렬
-   Streamlit 1.63은 .main 대신 stMainBlockContainer를 사용한다.
-   구버전 선택자도 함께 남겨 둔다. */
-[data-testid="stMainBlockContainer"],
-.main .block-container {
-  max-width: 1200px !important;
-  padding-top: 1.75rem !important;
-  padding-bottom: 2.5rem !important;
-  margin: 0 auto !important;
+.stButton > button[data-testid="stBaseButton-primary"]:hover {
+  background-color: var(--primary-hover);
+  border-color: var(--primary-hover);
+  color: #FFFFFF;
 }
 
-/* 카드 컨테이너 스타일 (border=True인 st.container) */
-div[data-testid="stVerticalBlockBorderWrapper"] {
-  background-color: var(--bg-card) !important;
-  border: 1px solid var(--border-color) !important;
-  border-radius: var(--radius-card) !important;
-  box-shadow: var(--shadow-subtle) !important;
-  padding: 16px !important;
-  margin-bottom: 20px !important;
+.stButton > button:disabled,
+.stButton > button:disabled:hover {
+  background-color: var(--bg-subtle);
+  border-color: var(--border-color);
+  color: var(--text-disabled);
+  cursor: not-allowed;
 }
 
-/* ── 대시보드 2열 레이아웃 ─────────────────────────────────
-   가로 비율(70% / 30%)과 줄바꿈 금지는 app.py의
-   st.columns([7, 3], wrap=False)가 정한다. CSS로 위치를 옮기지 않는다.
-
-   Streamlit 1.63은 각 열에 width/flex-basis를 퍼센트로 주지만 min-width는
-   지정하지 않는다(wrap=True일 때). 그러면 flex 항목의 기본값 min-width:auto가
-   적용되어, 열 안의 내용이 넓으면 열이 자기 비율보다 커지고 flex-wrap:wrap과
-   맞물려 오른쪽 열이 아래 줄로 밀려난다. min-width를 0으로 풀어 이를 막는다.
-
-   :has()로 dash_left/dash_right를 담은 열만 고르므로 목록 안의 중첩 열은
-   영향을 받지 않는다. */
-div[data-testid="stColumn"]:has(.st-key-dash_left),
-div[data-testid="stColumn"]:has(.st-key-dash_right) {
-  min-width: 0 !important;
+/* 키보드 포커스는 항상 보이게 둔다. */
+.stButton > button:focus-visible {
+  outline: 2px solid var(--primary-color);
+  outline-offset: 2px;
 }
 
-/* 1024px 이하에서는 실제로 1열로 쌓는다. (내용을 잘라 숨기지 않는다)
-   wrap=False로 꺼 둔 줄바꿈을 이 구간에서만 다시 켠다. */
-@media (max-width: 1024px) {
-  div[data-testid="stHorizontalBlock"]:has(.st-key-dash_right) {
-    flex-wrap: wrap !important;
-  }
-  div[data-testid="stColumn"]:has(.st-key-dash_left),
-  div[data-testid="stColumn"]:has(.st-key-dash_right) {
-    flex: 1 1 100% !important;
-    width: 100% !important;
-    max-width: 100% !important;
-  }
-  /* 목록 아래로 내려온 비서 패널이 위 카드와 붙지 않도록 한다. */
-  .st-key-dash_right {
-    margin-top: 4px;
-  }
-}
-
-/* 탭 스타일 */
-.stTabs [data-baseweb="tab-list"] {
-  gap: 8px;
-  border-bottom: 1px solid var(--border-color);
-  background-color: transparent;
-}
-
-.stTabs [data-baseweb="tab"] {
-  font-weight: 600;
-  font-size: 15px;
-  color: var(--text-sub);
-  padding: 10px 16px;
-  border-radius: var(--radius-button) var(--radius-button) 0 0;
-  border: none;
-  background-color: transparent;
-}
-
-.stTabs [aria-selected="true"] {
-  color: var(--primary-color) !important;
-  border-bottom: 2px solid var(--primary-color) !important;
-  background-color: transparent !important;
-}
-
-/* 버튼 스타일 (기본 & primary) */
-.stButton > button {
-  border-radius: var(--radius-button) !important;
-  font-weight: 600 !important;
-  font-size: 14px !important;
-  min-height: 40px !important;
-  border: 1px solid var(--border-color) !important;
-  background-color: var(--bg-card) !important;
-  color: var(--text-main) !important;
-  box-shadow: var(--shadow-subtle) !important;
-  transition: all 0.15s ease-in-out !important;
-}
-
-.stButton > button:hover {
-  border-color: var(--primary-color) !important;
-  color: var(--primary-color) !important;
-}
-
-.stButton > button[kind="primary"] {
-  background-color: var(--primary-color) !important;
-  color: #FFFFFF !important;
-  border-color: var(--primary-color) !important;
-}
-
-.stButton > button[kind="primary"] p,
-.stButton > button[kind="primary"] span {
-  color: #FFFFFF !important;
-}
-
-.stButton > button[kind="primary"]:hover {
-  background-color: var(--primary-hover) !important;
-  border-color: var(--primary-hover) !important;
-  color: #FFFFFF !important;
-}
-
-/* 텍스트 인풋, 에어리어 테두리 & 배경 */
-.stTextInput > div > div > input,
-.stTextArea > div > div > textarea {
-  border: 1px solid var(--border-color) !important;
-  border-radius: var(--radius-button) !important;
-  background-color: var(--bg-card) !important;
-  color: var(--text-main) !important;
-  font-family: var(--font-family) !important;
-}
-
-.stTextInput > div > div > input:focus,
-.stTextArea > div > div > textarea:focus {
-  border-color: var(--primary-color) !important;
-  box-shadow: 0 0 0 1px var(--primary-color) !important;
-}
-
-/* Dashboard & List Components */
+/* ── 헤더 ─────────────────────────────────────────────────── */
 .gov-header-left {
   display: flex;
   align-items: center;
@@ -172,52 +139,157 @@ div[data-testid="stColumn"]:has(.st-key-dash_right) {
 .gov-header-title-group {
   display: flex;
   flex-direction: column;
+  min-width: 0;
 }
 
-.gov-header-title {
-  font-size: 42px;
-  font-weight: 700;
+/* Streamlit 마크다운의 h1 기본 크기·여백(요소 선택자 포함)을 덮기 위해 요소명을 함께 쓴다. */
+.stMarkdown h1.gov-header-title {
   margin: 0;
+  padding: 0;
+  font-size: 30px;
+  font-weight: 700;
+  line-height: 1.3;
   color: var(--text-main);
-  line-height: 1.2;
 }
 
-@media (max-width: 768px) {
-  .gov-header-title {
-    font-size: 32px;
+.stMarkdown p.gov-header-subtitle {
+  margin: 2px 0 0;
+  font-size: 14px;
+  color: var(--text-sub);
+}
+
+/* ── 대시보드 2열 레이아웃 ─────────────────────────────────
+   가로 비율(70% / 30%)과 줄바꿈 금지는 app.py의
+   st.columns([7, 3], wrap=False)가 정한다. CSS로 위치를 옮기지 않는다.
+
+   flex 항목의 기본값 min-width:auto 때문에 내용이 넓으면 열이 자기 비율보다
+   커질 수 있어 min-width를 0으로 푼다. :has()로 dash_left/dash_right를 담은
+   열만 고르므로 목록 안의 중첩 열은 영향을 받지 않는다. */
+div[data-testid="stColumn"]:has(.st-key-dash_left),
+div[data-testid="stColumn"]:has(.st-key-dash_right) {
+  min-width: 0;
+}
+
+.st-key-dash_left,
+.st-key-dash_right {
+  gap: var(--section-gap);
+}
+
+/* 1024px 이하에서는 실제로 1열로 쌓는다. (내용을 잘라 숨기지 않는다)
+   wrap=False로 꺼 둔 줄바꿈을 이 구간에서만 다시 켠다. */
+@media (max-width: 1024px) {
+  div[data-testid="stHorizontalBlock"]:has(.st-key-dash_right) {
+    flex-wrap: wrap;
+    row-gap: var(--section-gap);
+  }
+
+  div[data-testid="stColumn"]:has(.st-key-dash_left),
+  div[data-testid="stColumn"]:has(.st-key-dash_right) {
+    flex: 1 1 100%;
+    width: 100%;
+    max-width: 100%;
   }
 }
 
-.gov-header-subtitle {
-  font-size: 14px;
-  color: var(--text-sub);
-  margin: 4px 0 0 0;
-}
-
-/* ── 카드 (실제 st.container에 key로 지정) ───────────────── */
+/* ── 카드 (실제 st.container에 key로 지정) ─────────────────
+   테두리는 border=True가 그린 것 하나만 쓰고 색·반경·여백만 맞춘다. */
 .st-key-bill_list_card,
 .st-key-bill_detail_card,
-.st-key-ai_panel {
+.st-key-ai_panel,
+.st-key-register_card {
   background-color: var(--bg-card);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-card);
-  padding: 14px 16px;
-  box-shadow: none;
-  margin-bottom: 20px;
+  padding: var(--card-padding);
+}
+
+.card-section-title {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-main);
+}
+
+.card-section-count {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-sub);
+}
+
+/* ── 가장 가까운 납부기한 ─────────────────────────────────── */
+.nearest-card {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-card);
+  padding: 16px var(--card-padding);
+}
+
+.nearest-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.nearest-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-sub);
+}
+
+.nearest-empty {
+  font-size: 14px;
+  color: var(--text-sub);
+}
+
+.nearest-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-main);
+  overflow-wrap: anywhere;
+  word-break: keep-all;
+}
+
+.nearest-details {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-shrink: 0;
+  text-align: right;
+}
+
+.nearest-amount {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-main);
+}
+
+.nearest-date {
+  font-size: 14px;
+  color: var(--text-sub);
 }
 
 /* ── 고지서 목록 (4열) ───────────────────────────────────── */
+.st-key-bill_list_card {
+  gap: 12px;
+}
+
 .bill-list-header {
   display: grid;
   grid-template-columns: 3fr 2fr 1fr 1fr;
   gap: 8px;
-  padding: 8px 12px;
-  background-color: #F8FAFC;
-  border-radius: 6px;
-  font-weight: 600;
+  padding: 0 10px 8px;
+  border-bottom: 1px solid var(--border-color);
   font-size: 12px;
+  font-weight: 600;
   color: var(--text-sub);
-  align-items: center;
 }
 
 /* grid 항목도 기본 min-width:auto라서 내용이 열을 밀어낼 수 있다. */
@@ -228,138 +300,107 @@ div[data-testid="stColumn"]:has(.st-key-dash_right) {
 
 /* 행 구분선. bill_row_ 와 bill_row_sel_ 모두에 적용된다. */
 div[class*="st-key-bill_row_"] {
-  padding: 6px 10px;
+  padding: 4px 10px 12px;
   border-bottom: 1px solid var(--border-color);
+}
+
+/* 긴 고지서명·기관명은 열 안에서 줄바꿈한다. */
+div[class*="st-key-bill_row_"] .stMarkdown,
+div[class*="st-key-bill_row_"] [data-testid="stCaptionContainer"] {
+  overflow-wrap: anywhere;
+  word-break: keep-all;
 }
 
 /* 선택된 행 강조. 다른 고지서를 선택하면 key 접두사가 바뀌므로
    이전 행의 강조는 자동으로 해제된다. */
 div[class*="st-key-bill_row_sel_"] {
-  background-color: #F0F5FF;
-  border-left: 3px solid var(--primary-color);
-  border-radius: 4px;
-}
-
-.card-section-count {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-sub);
-}
-
-.detail-footnote {
-  margin-top: 14px;
-  font-size: 13px;
-  color: var(--text-sub);
-}
-
-/* ── AI 비서 패널 ────────────────────────────────────────── */
-.ai-panel-title {
-  font-size: 16px;
-  font-weight: 700;
-  color: var(--primary-color);
-  margin: 0 0 2px 0;
-}
-
-.ai-target {
-  font-size: 13px;
-  padding: 7px 10px;
+  background-color: var(--primary-soft);
+  box-shadow: inset 3px 0 0 var(--primary-color);
   border-radius: 6px;
-  margin: 8px 0 10px 0;
-  line-height: 1.4;
+}
+
+/* ── 빈 목록 ─────────────────────────────────────────────── */
+.st-key-bill_empty {
+  min-height: 200px;
+  justify-content: center;
+  gap: 6px;
+}
+
+.st-key-bill_empty [data-testid="stMarkdownContainer"] {
+  text-align: center;
+}
+
+.empty-title {
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.empty-desc {
+  margin-top: 4px;
+  font-size: 14px;
+  color: var(--text-sub);
+}
+
+.st-key-empty_register_btn {
+  margin-top: 8px;
+}
+
+/* ── 선택 고지서 상세 ────────────────────────────────────── */
+.detail-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.stMarkdown h3.detail-title {
+  margin: 0;
+  padding: 0;
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.35;
+  color: var(--text-main);
+  overflow-wrap: anywhere;
   word-break: keep-all;
 }
 
-.ai-target-on {
-  background-color: #F0F5FF;
-  color: var(--primary-color);
-  font-weight: 600;
-  border: 1px solid #DBE4F5;
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px 24px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-color);
 }
 
-.ai-target-off {
-  background-color: #F8FAFC;
-  color: var(--text-sub);
-  border: 1px solid var(--border-color);
-}
-
-.st-key-ai_history {
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
-  padding: 6px 8px;
-  background-color: #FCFCFD;
-  margin-bottom: 10px;
-}
-
-.st-key-ai_panel div[data-testid="stChatMessage"] {
-  padding: 4px 6px;
-  background-color: transparent;
-}
-
-.st-key-ai_panel .stButton > button {
-  min-height: 32px !important;
-  font-size: 13px !important;
-  padding: 0 8px !important;
-  box-shadow: none !important;
-}
-
-.st-key-ai_ex_wide {
-  margin-top: 6px;
-}
-
-.nearest-card {
+.detail-item {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
-  background-color: #F8FAFC;
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-card);
-  padding: 20px;
-  margin-bottom: 32px;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
 }
 
-.nearest-label {
+.detail-item-label {
   font-size: 13px;
-  font-weight: 600;
   color: var(--text-sub);
 }
 
-.nearest-title {
-  font-size: 18px;
-  font-weight: 700;
-  color: var(--text-main);
-}
-
-.nearest-details {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  text-align: right;
-}
-
-.nearest-amount {
-  font-size: 20px;
-  font-weight: 700;
-  color: var(--text-main);
-}
-
-.nearest-date {
+.detail-item-value {
   font-size: 15px;
-  color: var(--text-sub);
+  font-weight: 500;
+  color: var(--text-main);
+  overflow-wrap: anywhere;
+  word-break: keep-all;
 }
 
-.card-section-title {
-  font-size: 18px;
-  font-weight: 700;
-  color: var(--text-main);
-  margin-bottom: 16px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.detail-footnote {
+  margin-top: 4px;
+  font-size: 13px;
+  color: var(--text-sub);
 }
 
 .status-badge {
   display: inline-block;
-  padding: 4px 8px;
+  padding: 3px 8px;
   border-radius: 4px;
   font-size: 12px;
   font-weight: 600;
@@ -382,34 +423,122 @@ div[class*="st-key-bill_row_sel_"] {
   color: #475467;
 }
 
-.detail-grid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 16px;
-  background-color: #F8FAFC;
-  padding: 16px;
-  border-radius: 8px;
+/* ── AI 비서 패널 ────────────────────────────────────────── */
+.st-key-ai_panel {
+  gap: 12px;
 }
 
-.detail-item {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.detail-item-label {
-  font-size: 13px;
-  color: var(--text-sub);
-}
-
-.detail-item-value {
-  font-size: 15px;
-  font-weight: 500;
+.ai-panel-title {
+  font-size: 19px;
+  font-weight: 700;
+  line-height: 1.35;
   color: var(--text-main);
 }
 
-/* ── 좁은 화면 보정 (가로 스크롤 없이 1열로) ───────────── */
+.ai-panel-desc {
+  margin-top: 2px;
+  font-size: 14px;
+  color: var(--text-sub);
+}
+
+.ai-target {
+  padding: 8px 10px;
+  border-radius: 6px;
+  background-color: var(--primary-soft);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  word-break: keep-all;
+}
+
+.ai-target-label {
+  display: block;
+  font-size: 12px;
+  color: var(--text-sub);
+}
+
+.ai-target-name {
+  display: block;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--primary-color);
+}
+
+.ai-target-empty {
+  font-size: 14px;
+  color: var(--text-sub);
+}
+
+/* 대화 없음: 안내 한 줄만 담는 낮은 영역 (테두리 없음) */
+.st-key-ai_history_empty {
+  min-height: 88px;
+  justify-content: center;
+  align-items: center;
+  border-radius: 6px;
+  background-color: var(--bg-subtle);
+}
+
+/* 대화 있음: 고정 높이(app.py _HISTORY_HEIGHT) 안에서 스크롤. 위아래 구분선만 둔다. */
+.st-key-ai_history {
+  gap: 4px;
+  padding: 4px 0;
+  border-top: 1px solid var(--border-color);
+  border-bottom: 1px solid var(--border-color);
+}
+
+.st-key-ai_history [data-testid="stChatMessage"] {
+  padding: 6px 2px;
+  gap: 10px;
+  background-color: transparent;
+}
+
+.st-key-ai_history .stMarkdown {
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.st-key-ai_examples {
+  gap: 4px;
+}
+
+/* 데스크톱 패널 폭(약 300px)에서 세 버튼이 한 줄에 들어가도록 좌우 여백을 줄인다.
+   더 좁으면 자연스럽게 다음 줄로 넘어간다. */
+.st-key-ai_examples .stButton > button {
+  min-height: 38px;
+  padding: 0 8px;
+  font-size: 13px;
+}
+
+/* ── 등록 화면 ───────────────────────────────────────────── */
+.st-key-register_card {
+  gap: 12px;
+}
+
+.stMarkdown h2.register-title {
+  margin: 0;
+  padding: 0;
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.35;
+  color: var(--text-main);
+}
+
+.stMarkdown p.register-desc {
+  margin: 4px 0 0;
+  font-size: 14px;
+  color: var(--text-sub);
+}
+
+/* ── 좁은 화면 (가로 스크롤 없이 1열로) ─────────────────── */
 @media (max-width: 640px) {
+  [data-testid="stMainBlockContainer"] {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+
+  .stMarkdown h1.gov-header-title {
+    font-size: 26px;
+  }
+
   /* 4열 헤더는 좁은 화면에서 의미가 없으므로 숨긴다.
      행 자체는 Streamlit이 1열로 쌓아 전부 보인다. */
   .st-key-bill_list_header {
@@ -427,14 +556,8 @@ div[class*="st-key-bill_row_sel_"] {
   }
 
   .nearest-details {
-    text-align: left;
     flex-wrap: wrap;
     gap: 10px;
-  }
-
-  [data-testid="stMainBlockContainer"],
-  .main .block-container {
-    padding-left: 1rem !important;
-    padding-right: 1rem !important;
+    text-align: left;
   }
 }

@@ -25,8 +25,28 @@ RETRY_INITIAL_DELAY = 1.0
 RETRY_EXP_BASE = 2.0
 
 
+# GeminiError.reason 값. 안내 문구는 그대로 두고, 호출자가 원인별로 분기할 때만 쓴다.
+REASON_MISSING_KEY = "missing_key"   # GEMINI_API_KEY 없음
+REASON_AUTH = "auth"                 # 401 또는 메시지상 API 키 오류
+REASON_FORBIDDEN = "forbidden"       # 403
+REASON_NOT_FOUND = "not_found"       # 404
+REASON_RATE_LIMIT = "rate_limit"     # 429 / quota
+REASON_BUSY = "busy"                 # 408·5xx 재시도 소진
+REASON_TIMEOUT = "timeout"           # 타임아웃·연결 실패
+REASON_OTHER = "other"
+
+
 class GeminiError(ValueError):
-    """Gemini 호출 관련 사용자 안내용 오류. (기존 ValueError 처리와 호환)"""
+    """Gemini 호출 관련 사용자 안내용 오류. (기존 ValueError 처리와 호환)
+
+    Attributes:
+        reason: 실패 원인 구분값(REASON_*). 지정하지 않으면 None.
+            str(error)로 보이는 안내 문구에는 영향을 주지 않는다.
+    """
+
+    def __init__(self, message: str = "", *, reason: str | None = None):
+        super().__init__(message)
+        self.reason = reason
 
 
 class GeminiBusyError(GeminiError):
@@ -66,7 +86,8 @@ def load_api_key(purpose: str) -> str:
     if not api_key:
         raise GeminiError(
             "GEMINI_API_KEY가 설정되지 않았습니다. "
-            f"{purpose} 기능을 사용하려면 .env 파일에 API 키를 추가해 주세요."
+            f"{purpose} 기능을 사용하려면 .env 파일에 API 키를 추가해 주세요.",
+            reason=REASON_MISSING_KEY,
         )
     return api_key
 
@@ -115,17 +136,25 @@ def raise_for_api_error(error, *, model_id: str, busy_message: str):
     code = getattr(error, "code", None)
 
     if code in (401, 403) or "api key" in err_msg:
-        raise GeminiError("API 인증에 실패했습니다. 유효한 API 키인지 확인해 주세요.")
+        raise GeminiError(
+            "API 인증에 실패했습니다. 유효한 API 키인지 확인해 주세요.",
+            reason=REASON_FORBIDDEN if code == 403 else REASON_AUTH,
+        )
     if code == 404 or "not found" in err_msg:
         raise GeminiError(
-            f"모델({model_id})을 찾을 수 없거나 접근이 제한되었습니다. (원인: {e_msg})"
+            f"모델({model_id})을 찾을 수 없거나 접근이 제한되었습니다. (원인: {e_msg})",
+            reason=REASON_NOT_FOUND,
         )
     if code == RATE_LIMIT_STATUS_CODE or "quota" in err_msg:
         # 429는 재시도하지 않고 즉시 안내한다.
-        raise GeminiError("API 사용량이 초과되었거나 요청이 제한되었습니다.")
+        raise GeminiError(
+            "API 사용량이 초과되었거나 요청이 제한되었습니다.",
+            reason=REASON_RATE_LIMIT,
+        )
     if code in TRANSIENT_STATUS_CODES:
         # 최대 3회 요청(SDK 재시도 포함) 후에도 계속 실패한 일시적 혼잡 오류
-        raise GeminiBusyError(busy_message)
+        raise GeminiBusyError(busy_message, reason=REASON_BUSY)
     raise GeminiError(
-        f"API 연결 실패 또는 모델에서 오류가 발생했습니다. (원인: {e_msg})"
+        f"API 연결 실패 또는 모델에서 오류가 발생했습니다. (원인: {e_msg})",
+        reason=REASON_OTHER,
     )

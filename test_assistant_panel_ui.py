@@ -17,9 +17,13 @@ google-genai SDK는 test_assistant_no_bill_data.py의 가짜 모듈로 대체하
 7. '선택한 고지서 요약' 버튼은 선택했을 때만 활성화된다
 8. 선택한 고지서 데이터가 요청에 포함되지 않는다 (답변에는 포함된다)
 9. 등록 화면을 다녀와도 대화가 유지된다
-10. 혼잡 오류가 일반 문구로 뭉개지지 않는다
+10. 503 혼잡은 저장된 고지서로 대체 답변하고, 401·403 인증 오류 안내는 그대로 보인다
 11. 렌더된 마크다운에 고아 HTML 태그가 없다
 12. 선택한 고지서가 삭제되면 선택 상태가 정리된다
+13. 정리 후 전역 상태가 같은 프로세스에서 복원된다
+14. 고지서 0건에서도 질문 UI를 쓸 수 있고, 첫 등록 안내만 표시된다
+15. 0건 안내의 '고지서 등록' 버튼은 등록 화면으로 이동한다 (API 호출 없음)
+16. 완료 고지서만 있으면 미납 없음 안내와 완료 건 보기 안내를 표시한다
 
 [검증 범위]
 가짜 SDK를 쓰므로 여기서 확인하는 것은 'UI가 언제 몇 번 호출하는가'이며,
@@ -125,7 +129,8 @@ _TRACKED_ENV = privacy_test._TRACKED_ENV
 
 # 화면에서 확인할 문구
 PANEL_TITLE = "고지서 AI 비서"
-PANEL_CAPTION = "납부 일정과 선택한 고지서 정보를 물어보세요."
+PANEL_CAPTION = "납부 일정과 선택한 고지서를 물어보세요."
+SELECT_HINT = "목록에서 고지서를 선택해 주세요."
 
 BILL_A = privacy_test.BILL_A
 BILL_B = privacy_test.BILL_B
@@ -258,7 +263,10 @@ def test_first_render_makes_no_call():
     texts = _markdown_values(at)
     assert any(PANEL_TITLE in t for t in texts), "패널 제목이 없습니다."
     assert any(PANEL_CAPTION in t for t in texts), "패널 설명이 없습니다."
-    assert any("고지서를 선택하면" in t for t in texts), "질문 대상 안내가 없습니다."
+    assert any(SELECT_HINT in t for t in texts), "질문 대상 안내가 없습니다."
+    assert sum(t.count(SELECT_HINT) for t in texts) == 1, (
+        "고지서 선택 안내가 패널 안에 중복 표시됩니다."
+    )
     print("PASS 1: 최초 렌더 API 호출 0회 / 제목·설명·질문 대상 안내 표시")
     return at
 
@@ -369,8 +377,15 @@ def test_selection_change_makes_no_call(at, bill_id):
         f"고지서 선택만으로 API가 {len(_CAPTURED)}회 호출되었습니다."
     )
     texts = _markdown_values(at)
-    assert any(f"현재 질문 대상: {BILL_A['title']}" in t for t in texts), (
-        "선택한 고지서명이 질문 대상으로 표시되지 않았습니다."
+    target_blocks = [t for t in texts if 'class="ai-target"' in t]
+    assert len(target_blocks) == 1, (
+        f"질문 대상 영역이 {len(target_blocks)}개입니다. 1개여야 합니다."
+    )
+    assert "질문 대상" in target_blocks[0] and BILL_A["title"] in target_blocks[0], (
+        f"선택한 고지서명이 질문 대상으로 표시되지 않았습니다.\n{target_blocks[0]}"
+    )
+    assert not any(SELECT_HINT in t for t in texts), (
+        "고지서를 선택했는데 선택 안내가 남아 있습니다."
     )
     print("PASS 4: 고지서 선택 -> API 호출 0회 / 질문 대상 표시 갱신")
 
@@ -486,30 +501,58 @@ def test_history_survives_view_switch(at):
 
 
 def test_busy_error_shows_curated_message(at):
-    """10: 혼잡 오류가 일반 문구로 뭉개지지 않는다."""
+    """10: 503 혼잡은 저장된 고지서로 대체 답변하고, 401·403 인증 오류는 숨기지 않는다."""
     import services.assistant as assistant
 
+    question = "이번 주에 낼 게 있어?"
+
+    # 503: 예외 없이(_run이 확인) 저장된 고지서 기준 대체 답변이 표시된다.
     _CAPTURED.clear()
     _NEXT_BEHAVIOR[0] = ("raise", FakeAPIError(503))
-    at.chat_input[0].set_value("이번 주에 낼 게 있어?")
+    at.chat_input[0].set_value(question)
     _run(at)
 
     answer = _assistant_messages(at)[-1]
-    assert answer == assistant.BUSY_MESSAGE, (
-        f"혼잡 안내가 그대로 노출되어야 합니다.\n기대: {assistant.BUSY_MESSAGE}\n실제: {answer}"
+    assert answer.startswith(assistant.FALLBACK_NOTICE), (
+        f"503에서 대체 답변 안내가 첫 줄에 없습니다.\n답변: {answer}"
+    )
+    # 답변 본문은 같은 DB에서 로컬로 조립한 이번 주 답변과 정확히 같아야 한다.
+    expected_body = assistant._generate_answer(
+        "this_week", assistant._query_data("this_week")
+    )
+    assert answer == f"{assistant.FALLBACK_NOTICE}\n\n{expected_body}", (
+        f"저장된 고지서 기준 답변과 다릅니다.\n기대 본문: {expected_body}\n실제: {answer}"
+    )
+    assert assistant.BUSY_MESSAGE not in answer, f"혼잡 문구가 노출됩니다: {answer}"
+    # 대체 답변 과정에서 추가 요청이 없고, 요청에는 질문만 담긴다.
+    assert len(_CAPTURED) == 1, f"503 처리 중 API 호출이 {len(_CAPTURED)}회입니다."
+    assert _CAPTURED[0]["contents"] == question, (
+        f"전송 내용이 질문과 다릅니다: {_CAPTURED[0]['contents']!r}"
+    )
+    privacy_test._assert_absent(
+        [BILL_A["title"], BILL_A["agency"], BILL_A["payment_method"],
+         BILL_B["title"], BILL_B["agency"], BILL_B["payment_method"]],
+        privacy_test._payload_text(),
+        "UI 503 fallback",
     )
 
-    _CAPTURED.clear()
-    _NEXT_BEHAVIOR[0] = ("raise", FakeAPIError(401))
-    at.chat_input[0].set_value("이번 주에 낼 게 있어?")
-    _run(at)
-    answer = _assistant_messages(at)[-1]
-    assert "인증" in answer, f"인증 실패 안내가 아닙니다: {answer}"
-    assert "답변 생성 중 오류가 발생했습니다" not in answer, (
-        f"인증 오류가 일반 문구로 숨겨졌습니다: {answer}"
-    )
+    # 401·403: 대체 답변으로 숨기지 않고 인증 안내를 그대로 보여준다.
+    for code in (401, 403):
+        _CAPTURED.clear()
+        _NEXT_BEHAVIOR[0] = ("raise", FakeAPIError(code))
+        at.chat_input[0].set_value(question)
+        _run(at)
+        answer = _assistant_messages(at)[-1]
+        assert "인증" in answer, f"{code}: 인증 실패 안내가 아닙니다: {answer}"
+        assert assistant.FALLBACK_NOTICE not in answer, (
+            f"{code}: 인증 오류가 대체 답변으로 숨겨졌습니다: {answer}"
+        )
+        assert "답변 생성 중 오류가 발생했습니다" not in answer, (
+            f"{code}: 인증 오류가 일반 문구로 숨겨졌습니다: {answer}"
+        )
+        assert len(_CAPTURED) == 1, f"{code}: API 호출이 {len(_CAPTURED)}회입니다."
     _ok_response()
-    print("PASS 10: 혼잡·인증 오류 안내가 그대로 노출됨")
+    print("PASS 10: 503 -> 저장된 고지서 기준 대체 답변 / 401·403 -> 인증 안내 유지")
 
 
 def test_no_dangling_html_tags(at):
@@ -543,7 +586,7 @@ def test_deleted_selection_clears_state(at, bill_id):
     assert len(_CAPTURED) == 0, "선택 정리 과정에서 API가 호출되었습니다."
 
     texts = _markdown_values(at)
-    assert any("고지서를 선택하면" in t for t in texts), (
+    assert any(SELECT_HINT in t for t in texts), (
         "선택 해제 후 안내 문구가 표시되지 않았습니다."
     )
     print("PASS 12: 삭제된 선택 자동 해제 / API 호출 0회")
@@ -563,17 +606,20 @@ def test_question_ui_available_with_no_bills():
 
     assert len(at.chat_input) == 1, "고지서가 없을 때 질문 입력창이 사라졌습니다."
     assert _button(at, "ai_ex_week").disabled is False, (
-        "고지서가 없어도 '이번 주 납부 일정'은 사용할 수 있어야 합니다."
+        "고지서가 없어도 '이번 주 일정'은 사용할 수 있어야 합니다."
     )
     assert _button(at, "ai_ex_month").disabled is False, (
-        "고지서가 없어도 '이번 달 미납 합계'는 사용할 수 있어야 합니다."
+        "고지서가 없어도 '이번 달 합계'는 사용할 수 있어야 합니다."
     )
     assert _button(at, "ai_ex_bill").disabled is True, (
         "선택한 고지서가 없으면 요약 버튼은 비활성이어야 합니다."
     )
     texts = _markdown_values(at)
-    assert any("등록된 고지서가 없어도 납부 일정은 물어볼 수 있습니다" in t for t in texts), (
-        "고지서가 없을 때의 안내 문구가 없습니다."
+    assert any("첫 고지서를 등록해 보세요." in t for t in texts), (
+        "고지서가 없을 때 목록의 첫 등록 안내가 없습니다."
+    )
+    assert not any("예정된 미납 고지서가 없습니다" in t for t in texts), (
+        "고지서가 0건인데 '가장 가까운 납부기한' 빈 카드가 중복 안내로 남아 있습니다."
     )
     assert len(_CAPTURED) == 0, "고지서가 없는 화면을 그리며 API가 호출되었습니다."
 
@@ -584,6 +630,51 @@ def test_question_ui_available_with_no_bills():
     answer = _assistant_messages(at)[-1]
     assert "없습니다" in answer, f"0건일 때 답변이 이상합니다: {answer}"
     print("PASS 14: 고지서 0건에서도 입력창·일정 질문 버튼 사용 가능 / 요약만 비활성")
+
+
+def test_empty_state_register_button():
+    """15: 0건 안내의 '고지서 등록' 버튼은 기존 등록 화면으로 이동하며 API를 부르지 않는다."""
+    assert not db_module.get_bills(include_paid=True), "이 테스트는 고지서 0건에서 실행해야 합니다."
+
+    _CAPTURED.clear()
+    at = _run(_new_app())
+    _button(at, "empty_register_btn").click()
+    _run(at)
+
+    assert at.session_state["current_view"] == "register", (
+        "'고지서 등록' 버튼이 등록 화면으로 이동하지 않았습니다."
+    )
+    assert any("목록으로" in b.label for b in at.button), "등록 화면이 그려지지 않았습니다."
+    assert len(_CAPTURED) == 0, "등록 화면 이동 중에 API가 호출되었습니다."
+    print("PASS 15: 0건 안내 '고지서 등록' -> 등록 화면 이동 / API 호출 0회")
+
+
+def test_paid_only_empty_state():
+    """16: 완료 고지서만 있으면 '미납 고지서가 없습니다'와 완료 건 보기 안내를 보여준다."""
+    bill_id = _save(BILL_B, days=3)
+    assert db_module.mark_as_paid(bill_id) is True
+
+    _CAPTURED.clear()
+    at = _run(_new_app())
+    texts = _markdown_values(at)
+    assert any("미납 고지서가 없습니다." in t for t in texts), "완료 건만 있을 때의 안내가 없습니다."
+    assert any("납부완료 고지서도 보기" in t for t in texts), "완료 건 보기 안내가 없습니다."
+    assert not any("첫 고지서를 등록해 보세요." in t for t in texts), (
+        "완료 고지서가 있는데 첫 등록 안내가 표시되었습니다."
+    )
+    assert len(at.checkbox) == 1, "완료 건을 볼 수 있는 체크박스가 없습니다."
+    try:
+        _button(at, "empty_register_btn")
+        raise AssertionError("완료 고지서가 있는데 첫 등록 버튼이 표시되었습니다.")
+    except KeyError:
+        pass
+
+    # 체크박스를 켜면 완료 건이 목록에 나타난다 (기존 필터 동작 유지)
+    at.checkbox[0].check()
+    _run(at)
+    _button(at, f"sel_btn_{bill_id}")  # 없으면 KeyError
+    assert len(_CAPTURED) == 0, "빈 상태 화면에서 API가 호출되었습니다."
+    print("PASS 16: 완료 건만 있을 때 미납 없음 안내 / 체크박스로 완료 건 표시")
 
 
 # ── 실행 ──────────────────────────────────────────────────────
@@ -620,6 +711,9 @@ def main():
         test_no_dangling_html_tags(at)
         test_deleted_selection_clears_state(at, id_a)
         test_question_ui_available_with_no_bills()
+        # 14번은 0건 상태에서 질문 1회를 남긴다. 등록 버튼 테스트는 새 세션에서 0건을 확인한다.
+        test_empty_state_register_button()
+        test_paid_only_empty_state()
         print("\n전체 통과: 클릭·전송 시에만 1회 호출되며 재실행·선택으로는 호출되지 않습니다.")
     finally:
         _restore_state(snapshot)

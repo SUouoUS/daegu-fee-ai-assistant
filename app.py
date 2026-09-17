@@ -12,7 +12,9 @@ import streamlit as st
 
 from services.parser import extract_text_from_pdf, normalize_notice_text, pdf_info
 from services.extractor import extract_notice_info
-from services.assistant import ask as assistant_ask
+# API 일시 실패(키 누락·429·408/5xx·타임아웃·연결 실패) 시 핵심 질문은 저장된 고지서로
+# 대신 답한다. 401·403 인증·권한 오류는 숨기지 않고 원래 안내를 보여준다.
+from services.assistant import ask_with_fallback as assistant_ask
 from services.gemini_client import GeminiError
 from database.db import (
     init_db,
@@ -23,6 +25,8 @@ from database.db import (
     mark_as_paid,
     mark_as_unpaid,
     delete_bill,
+    parse_amount,
+    parse_due_date,
 )
 
 # ── DB 초기화 (앱 시작 시 1회) ────────────────────────────────
@@ -42,6 +46,7 @@ def load_css():
         try:
             with open(css_path, "r", encoding="utf-8") as f:
                 css_content = f.read()
+            # 스타일을 담은 이 빈 요소가 본문 첫 칸을 차지하지 않도록 CSS에서 제외한다.
             st.markdown(f"<style>{css_content}</style>", unsafe_allow_html=True)
         except Exception:
             pass
@@ -120,11 +125,11 @@ def calculate_status(bill: dict) -> tuple[str, str, str]:
     """
     if bill.get("status") == "납부완료":
         return "완료", "status-badge paid", "완료"
-    due_date_str = bill.get("due_date")
-    if not due_date_str:
+    # 일정 조회(database.db)와 같은 기준으로 해석한다. 실제 YYYY-MM-DD가 아니면 '미납'.
+    due_date = parse_due_date(bill.get("due_date"))
+    if due_date is None:
         return "미납", "status-badge unpaid", "미납"
     try:
-        due_date = datetime.date.fromisoformat(due_date_str.strip())
         today = datetime.date.today()
         days_left = (due_date - today).days
 
@@ -144,12 +149,12 @@ def calculate_status(bill: dict) -> tuple[str, str, str]:
 
 def render_header():
     """상단 공통 서비스 헤더"""
-    col_left, col_right = st.columns([3, 1])
+    col_left, col_right = st.columns([3, 1], vertical_alignment="center")
     with col_left:
         st.markdown(
             """
             <div class="gov-header-left">
-                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#1F4E79" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0;">
+                <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#1F4E79" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink: 0;">
                     <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
                     <polyline points="14 2 14 8 20 8"></polyline>
                     <line x1="16" y1="13" x2="8" y2="13"></line>
@@ -166,9 +171,11 @@ def render_header():
         )
     with col_right:
         if st.session_state["current_view"] == "dashboard":
-            if st.button("+ 고지서 추가", type="primary", use_container_width=True):
-                st.session_state["current_view"] = "register"
-                st.rerun()
+            # 버튼은 내용 폭으로 두고 오른쪽 끝에 붙인다.
+            with st.container(horizontal=True, horizontal_alignment="right"):
+                if st.button("+ 고지서 추가", type="primary"):
+                    st.session_state["current_view"] = "register"
+                    st.rerun()
 
 
 def render_nearest_notice():
@@ -179,7 +186,7 @@ def render_nearest_notice():
             """
             <div class="nearest-card">
                 <div class="nearest-label">가장 가까운 납부기한</div>
-                <div style="color: #667085; font-size: 15px;">예정된 미납 고지서가 없습니다.</div>
+                <div class="nearest-empty">예정된 미납 고지서가 없습니다.</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -187,7 +194,7 @@ def render_nearest_notice():
         return
 
     title = html.escape(nearest.get("title") or "고지서명 미확인")
-    amount = nearest.get("amount")
+    amount = parse_amount(nearest.get("amount"))
     amount_str = f"{amount:,}원" if amount is not None else "금액 미확인"
     due_date = html.escape(nearest.get("due_date") or "미확인")
     status_text, badge_cls, dday_text = calculate_status(nearest)
@@ -195,7 +202,7 @@ def render_nearest_notice():
     st.markdown(
         f"""
         <div class="nearest-card">
-            <div style="display: flex; flex-direction: column; gap: 4px;">
+            <div class="nearest-main">
                 <div class="nearest-label">가장 가까운 납부기한</div>
                 <div class="nearest-title">{title}</div>
             </div>
@@ -210,31 +217,35 @@ def render_nearest_notice():
     )
 
 
-def render_notice_list(bills: list[dict]):
+def render_notice_list(bills: list[dict], *, has_any_bill: bool = True):
     """저장된 고지서 목록 카드/테이블 렌더링.
 
     비서 패널이 오른쪽 열을 차지해 목록 폭이 좁아지므로 4열로 표시한다.
     (고지서명+기관 / 금액+기한 / 상태 / 선택)
+
+    Args:
+        bills: 현재 필터(show_paid)로 조회한 고지서 목록.
+        has_any_bill: 상태와 무관하게 저장된 고지서가 한 건이라도 있는지.
+            없으면 필터 체크박스 대신 첫 등록 안내를 보여준다.
     """
     with st.container(key="bill_list_card", border=True):
-        col_t1, col_t2 = st.columns([3, 2])
+        col_t1, col_t2 = st.columns([3, 2], vertical_alignment="center")
         with col_t1:
             st.markdown(
                 f'<div class="card-section-title"><span>고지서 목록</span> '
                 f'<span class="card-section-count">(총 {len(bills)}건)</span></div>',
                 unsafe_allow_html=True,
             )
-        with col_t2:
-            show_paid_val = st.checkbox("납부완료 고지서도 보기", value=st.session_state["show_paid"], key="chk_show_paid")
-            if show_paid_val != st.session_state["show_paid"]:
-                st.session_state["show_paid"] = show_paid_val
-                st.rerun()
+        if has_any_bill:
+            # 저장된 고지서가 없으면 걸러 볼 대상이 없으므로 체크박스를 두지 않는다.
+            with col_t2:
+                show_paid_val = st.checkbox("납부완료 고지서도 보기", value=st.session_state["show_paid"], key="chk_show_paid")
+                if show_paid_val != st.session_state["show_paid"]:
+                    st.session_state["show_paid"] = show_paid_val
+                    st.rerun()
 
         if not bills:
-            if st.session_state["show_paid"]:
-                st.info("저장된 고지서가 없습니다. '고지서 추가' 버튼을 눌러 고지서를 신규 등록해 보세요.")
-            else:
-                st.info("미납 고지서가 없습니다. 완료된 고지서를 확인하려면 위 체크박스를 선택해 주세요.")
+            _render_empty_list(has_any_bill)
             return
 
         # 헤더 행 (좁은 화면에서는 CSS로 숨긴다)
@@ -261,7 +272,7 @@ def render_notice_list(bills: list[dict]):
             with st.container(key=row_key):
                 title = html.escape(bill.get("title") or "제목 없음")
                 agency = html.escape(bill.get("agency") or "기관 미확인")
-                amount = bill.get("amount")
+                amount = parse_amount(bill.get("amount"))
                 amount_str = f"{amount:,}원" if amount is not None else "금액 미확인"
                 due_date = html.escape(bill.get("due_date") or "기한 미확인")
                 status_text, badge_cls, dday_text = calculate_status(bill)
@@ -285,6 +296,28 @@ def render_notice_list(bills: list[dict]):
                         st.rerun()
 
 
+def _render_empty_list(has_any_bill: bool):
+    """목록이 비었을 때의 안내. render_notice_list()에서만 호출한다."""
+    with st.container(key="bill_empty", horizontal_alignment="center"):
+        if has_any_bill:
+            st.markdown(
+                '<div class="empty-title">미납 고지서가 없습니다.</div>'
+                '<div class="empty-desc">완료된 고지서는 ‘납부완료 고지서도 보기’를 선택하면 볼 수 있습니다.</div>',
+                unsafe_allow_html=True,
+            )
+            return
+
+        st.markdown(
+            '<div class="empty-title">첫 고지서를 등록해 보세요.</div>'
+            '<div class="empty-desc">PDF 또는 텍스트에서 금액과 납부기한을 정리합니다.</div>',
+            unsafe_allow_html=True,
+        )
+        # 상단 '+ 고지서 추가'와 같은 동작이다.
+        if st.button("고지서 등록", key="empty_register_btn", type="primary"):
+            st.session_state["current_view"] = "register"
+            st.rerun()
+
+
 def render_notice_detail(selected_bill: dict | None):
     """선택한 고지서 상세정보 및 액션 버튼 카드.
 
@@ -306,7 +339,7 @@ def _render_notice_detail_body(selected_bill: dict):
     selected_id = selected_bill["id"]
     title = html.escape(selected_bill.get("title") or "확인되지 않음")
     agency = html.escape(selected_bill.get("agency") or "확인되지 않음")
-    amount = selected_bill.get("amount")
+    amount = parse_amount(selected_bill.get("amount"))
     amount_str = f"{amount:,}원" if amount is not None else "확인되지 않음"
     due_date = html.escape(selected_bill.get("due_date") or "확인되지 않음")
     payment_method = html.escape(selected_bill.get("payment_method") or "확인되지 않음")
@@ -315,9 +348,9 @@ def _render_notice_detail_body(selected_bill: dict):
 
     st.markdown(
         f"""
-        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px;">
+        <div class="detail-header">
             <div style="display: flex; align-items: center; gap: 10px;">
-                <h3 style="font-size: 20px; font-weight: 700; margin: 0; color: #182230;">{title}</h3>
+                <h3 class="detail-title">{title}</h3>
                 <span class="{badge_cls}">{dday_text}</span>
             </div>
         </div>
@@ -426,7 +459,6 @@ def _render_notice_detail_body(selected_bill: dict):
 def render_dashboard_view():
     """대시보드 메인 화면 (왼쪽: 고지서 목록·상세 / 오른쪽: AI 비서)"""
     render_header()
-    render_nearest_notice()
 
     # 선택 상태는 목록 필터와 무관하게 DB에서 한 번만 해소한다.
     # (납부완료 고지서를 선택한 뒤 필터를 꺼도 선택이 유지되어야 한다.)
@@ -440,8 +472,12 @@ def render_dashboard_view():
         selected_id = None
 
     bills = get_bills(include_paid=st.session_state["show_paid"])
-    # 목록이 비어 있어도 다른 상태의 고지서가 있을 수 있다. (비서 안내 문구용)
+    # 목록이 비어 있어도 다른 상태의 고지서가 있을 수 있다.
     has_any_bill = bool(bills) or bool(get_bills(include_paid=True))
+
+    # 저장된 고지서가 전혀 없으면 목록의 첫 등록 안내와 겹치므로 요약 카드를 생략한다.
+    if has_any_bill:
+        render_nearest_notice()
 
     # 여기부터 2열. wrap=False여야 왼쪽 열의 내용 폭 때문에 오른쪽 열이
     # 아래 줄로 밀려나지 않는다. (좁은 화면 1열 전환은 CSS가 담당한다)
@@ -451,24 +487,27 @@ def render_dashboard_view():
         )
         with col_main:
             with st.container(key="dash_left"):
-                render_notice_list(bills)
+                render_notice_list(bills, has_any_bill=has_any_bill)
                 render_notice_detail(selected_bill)
         with col_side:
             with st.container(key="dash_right"):
-                render_assistant_panel(selected_bill, has_any_bill=has_any_bill)
+                render_assistant_panel(selected_bill)
 
 
 # ── AI 비서 패널 (대시보드 오른쪽 열) ────────────────────────
 
 # (key 접미사, 버튼 라벨, 실제로 보낼 질문, 고지서 선택 필요 여부)
 _EXAMPLE_QUESTIONS = (
-    ("week", "이번 주 납부 일정", "이번 주에 납부할 고지서 알려줘", False),
-    ("month", "이번 달 미납 합계", "이번 달 미납 고지서 합계 금액 알려줘", False),
-    ("bill", "선택한 고지서 요약", "이 고지서 요약해 줘", True),
+    ("week", "이번 주 일정", "이번 주에 납부할 고지서 알려줘", False),
+    ("month", "이번 달 합계", "이번 달 미납 고지서 합계 금액 알려줘", False),
+    ("bill", "선택 고지서 요약", "이 고지서 요약해 줘", True),
 )
 
+# 대화가 있을 때 기록 영역의 고정 높이(px). 넘치면 영역 안에서 스크롤한다.
+_HISTORY_HEIGHT = 240
 
-def render_assistant_panel(selected_bill: dict | None, *, has_any_bill: bool = True):
+
+def render_assistant_panel(selected_bill: dict | None):
     """대시보드에 상주하는 AI 비서 패널.
 
     예시 버튼과 직접 입력 모두 _handle_question() 하나만 거치며,
@@ -476,40 +515,32 @@ def render_assistant_panel(selected_bill: dict | None, *, has_any_bill: bool = T
     고지서 선택 변경만으로는 호출되지 않는다.
 
     질문 UI(입력창·일정 질문 버튼)는 고지서가 없어도 항상 사용할 수 있다.
-    고지서를 선택해야 하는 기능(선택한 고지서 요약)만 비활성화된다.
+    고지서를 선택해야 하는 기능(선택 고지서 요약)만 비활성화된다.
 
     Args:
         selected_bill: 선택된 고지서 dict. 없으면 None.
-        has_any_bill: 저장된 고지서가 한 건이라도 있는지. 안내 문구에만 쓴다.
     """
     selected_bill_id = selected_bill["id"] if selected_bill else None
 
     with st.container(key="ai_panel", border=True):
         st.markdown(
-            '<div class="ai-panel-title">고지서 AI 비서</div>',
+            '<div class="ai-panel-title">고지서 AI 비서</div>'
+            '<div class="ai-panel-desc">납부 일정과 선택한 고지서를 물어보세요.</div>',
             unsafe_allow_html=True,
         )
-        st.caption("납부 일정과 선택한 고지서 정보를 물어보세요.")
 
-        # 질문 대상 표시 — 항상 노출한다.
+        # 질문 대상 표시 — 선택 안내는 이곳 한 군데에만 둔다.
         if selected_bill:
             target = html.escape(selected_bill.get("title") or "제목 없는 고지서")
             st.markdown(
-                f'<div class="ai-target ai-target-on">현재 질문 대상: {target}</div>',
-                unsafe_allow_html=True,
-            )
-        elif has_any_bill:
-            st.markdown(
-                '<div class="ai-target ai-target-off">'
-                "고지서를 선택하면 해당 고지서에 대해 질문할 수 있습니다.</div>",
+                '<div class="ai-target">'
+                '<span class="ai-target-label">질문 대상</span>'
+                f'<span class="ai-target-name">{target}</span></div>',
                 unsafe_allow_html=True,
             )
         else:
-            # 고지서가 없어도 납부 일정 질문은 할 수 있으므로 그 점을 알린다.
             st.markdown(
-                '<div class="ai-target ai-target-off">'
-                "고지서를 선택하면 해당 고지서에 대해 질문할 수 있습니다. "
-                "아직 등록된 고지서가 없어도 납부 일정은 물어볼 수 있습니다.</div>",
+                '<div class="ai-target-empty">목록에서 고지서를 선택해 주세요.</div>',
                 unsafe_allow_html=True,
             )
 
@@ -518,38 +549,43 @@ def render_assistant_panel(selected_bill: dict | None, *, has_any_bill: bool = T
             st.info(notice, icon="ℹ️")
             st.session_state["assistant_notice"] = None
 
-        # 대화 기록. 이번 실행에서 생긴 대화도 이 컨테이너 안에 그린다.
-        history_box = st.container(key="ai_history", height=320, border=False)
-        with history_box:
-            if not st.session_state["chat_messages"]:
-                st.caption("아직 대화가 없습니다. 아래 예시 버튼으로 시작해 보세요.")
-            for msg in st.session_state["chat_messages"]:
-                with st.chat_message(msg["role"]):
-                    st.markdown(msg["content"])
+        # 대화 기록 자리. 높이는 이번 실행에서 질문이 있는지 알아야 정할 수 있으므로
+        # 자리만 먼저 잡고, 아래에서 버튼·입력창을 판정한 뒤 채운다.
+        history_slot = st.empty()
 
         # 이번 실행에서 처리할 질문. 세션에 저장하지 않는 지역 변수이므로
         # 다음 실행에서 되살아나지 않는다. (중복 처리 방지)
         submitted = None
 
-        col_ex1, col_ex2 = st.columns(2)
-        slots = (col_ex1, col_ex2, st.container(key="ai_ex_wide"))
-        for slot, (suffix, label, prompt, needs_selection) in zip(slots, _EXAMPLE_QUESTIONS):
-            with slot:
+        with st.container(key="ai_examples", horizontal=True, gap="small"):
+            for suffix, label, prompt, needs_selection in _EXAMPLE_QUESTIONS:
                 clicked = st.button(
                     label,
                     key=f"ai_ex_{suffix}",
                     disabled=needs_selection and selected_bill_id is None,
-                    use_container_width=True,
                 )
                 if clicked and submitted is None:
                     submitted = prompt
 
-        if selected_bill_id is None:
-            st.caption("'선택한 고지서 요약'은 목록에서 고지서를 선택하면 사용할 수 있습니다.")
-
         typed = st.chat_input("질문을 입력하세요…", key="ai_chat_input")
         if typed and submitted is None:
             submitted = typed
+
+        messages = st.session_state["chat_messages"]
+        if messages or submitted:
+            # 대화가 있으면 고정 높이로 두고 내부에서 스크롤한다.
+            # 이번 실행의 질문·답변도 이 컨테이너 안에 그린다.
+            history_box = history_slot.container(
+                key="ai_history", height=_HISTORY_HEIGHT, border=False, autoscroll=True
+            )
+            with history_box:
+                for msg in messages:
+                    with st.chat_message(msg["role"]):
+                        st.markdown(msg["content"])
+        else:
+            # 대화가 없으면 빈 상자 대신 안내 한 줄만 둔다.
+            with history_slot.container(key="ai_history_empty", border=False):
+                st.caption("예시 질문을 누르거나 직접 입력해 보세요.")
 
         if submitted:
             _handle_question(submitted, selected_bill_id, history_box)
@@ -589,15 +625,17 @@ def _handle_question(question: str, selected_bill_id, history_box):
 # ── 등록 화면 ───────────────────────────────────────────────
 def render_register_view():
     """고지서 등록 전용 화면"""
-    col_back, col_space = st.columns([1, 4])
-    with col_back:
-        if st.button("← 목록으로", use_container_width=True):
-            st.session_state["current_view"] = "dashboard"
-            st.rerun()
+    # 화면 폭 제한(약 760px)은 CSS가 register_card의 존재로 판단한다.
+    if st.button("← 목록으로"):
+        st.session_state["current_view"] = "dashboard"
+        st.rerun()
 
-    with st.container(border=True):
-        st.markdown('<h2 style="font-size: 22px; font-weight: 700; color: #182230; margin: 0 0 8px 0;">신규 고지서 등록</h2>', unsafe_allow_html=True)
-        st.markdown('<p style="font-size: 14px; color: #667085; margin-bottom: 24px;">고지서 PDF를 업로드하거나 내용을 직접 입력하면 AI가 정보를 자동으로 추출합니다.</p>', unsafe_allow_html=True)
+    with st.container(key="register_card", border=True):
+        st.markdown(
+            '<h2 class="register-title">신규 고지서 등록</h2>'
+            '<p class="register-desc">고지서 PDF를 업로드하거나 내용을 직접 입력하면 AI가 정보를 자동으로 추출합니다.</p>',
+            unsafe_allow_html=True,
+        )
 
         MAX_FILE_SIZE_MB = 10
         MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
@@ -619,9 +657,13 @@ def render_register_view():
         )
 
         if input_method == "PDF 업로드":
+            # max_upload_size는 업로드 영역의 'NMB per file' 안내와 위젯의 파일 크기 제한을
+            # 앱 제한값과 맞춘다. (미지정 시 Streamlit 기본 200MB가 표시된다)
+            # 아래 MAX_FILE_SIZE_BYTES 검사는 보조 방어로 그대로 둔다.
             uploaded_file = st.file_uploader(
-                "PDF 파일을 선택하세요 (최대 10 MB)",
+                f"PDF 파일을 선택하세요 (최대 {MAX_FILE_SIZE_MB} MB)",
                 type=["pdf"],
+                max_upload_size=MAX_FILE_SIZE_MB,
             )
 
             if uploaded_file is None:

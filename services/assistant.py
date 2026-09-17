@@ -26,6 +26,8 @@ from database.db import (
     get_bills_due_this_month,
     get_total_amount_this_month,
     get_nearest_due_bill,
+    parse_amount,
+    parse_due_date,
 )
 
 
@@ -227,7 +229,9 @@ def _classify_intent(question: str) -> str:
             e, model_id=model_id, busy_message=BUSY_MESSAGE
         )
     except (httpx.TimeoutException, httpx.ConnectError):
-        raise gemini_client.GeminiBusyError(BUSY_MESSAGE)
+        raise gemini_client.GeminiBusyError(
+            BUSY_MESSAGE, reason=gemini_client.REASON_TIMEOUT
+        )
 
     # 여기부터는 응답 형식 문제이므로 규칙 기반 안내로 흡수한다.
     try:
@@ -314,11 +318,12 @@ def _generate_answer(intent: str, data: dict) -> str:
 
 
 def _format_amount(value) -> str:
-    """금액을 '1,234원' 형식으로 만든다. 값이 없으면 '금액 미확인'."""
+    """금액을 '1,234원' 형식으로 만든다. 값이 없거나 해석할 수 없으면 '금액 미확인'."""
     # 0원도 유효한 금액이므로 falsy 검사가 아닌 None 비교를 사용한다.
-    if value is None:
+    amount = parse_amount(value)
+    if amount is None:
         return "금액 미확인"
-    return f"{value:,}원"
+    return f"{amount:,}원"
 
 
 def _bill_line(bill: dict) -> str:
@@ -330,15 +335,14 @@ def _bill_line(bill: dict) -> str:
 
 
 def _sum_amounts(bills: list) -> int:
-    """금액이 있는 고지서의 합계를 구한다."""
-    return sum(b.get("amount") or 0 for b in bills)
+    """금액을 해석할 수 있는 고지서의 합계를 구한다."""
+    return sum(parse_amount(b.get("amount")) or 0 for b in bills)
 
 
 def _days_left(due_date: str):
-    """납부기한까지 남은 일수. 파싱 실패 시 None."""
-    try:
-        due = datetime.date.fromisoformat(due_date)
-    except (TypeError, ValueError):
+    """납부기한까지 남은 일수. YYYY-MM-DD 실제 날짜가 아니면 None."""
+    due = parse_due_date(due_date)
+    if due is None:
         return None
     return (due - datetime.date.today()).days
 
@@ -389,7 +393,7 @@ def _payment_guidance(bill: dict) -> str:
 def _compose_bill_answer(intent: str, bill: dict) -> str:
     """선택한 고지서 한 건에 대한 답변을 조립한다. (저장된 정보만 사용)"""
     name = _bill_name(bill)
-    amount = bill.get("amount")
+    amount = parse_amount(bill.get("amount"))
     agency = bill.get("agency")
     due = bill.get("due_date")
     method = bill.get("payment_method")
@@ -516,3 +520,80 @@ def ask(question: str, *, selected_bill_id=None) -> str:
     data = _query_data(intent, selected_bill_id=selected_bill_id)
     answer = _generate_answer(intent, data)
     return answer
+
+
+# ── API 실패 시 로컬 대체 답변 ────────────────────────────────
+# 의도 분류(Gemini)가 실패해도 핵심 질문은 저장된 고지서로 답할 수 있게 한다.
+# 이 경로는 네트워크를 쓰지 않는다. 질문 문자열을 정규식으로만 판정하고,
+# 기존 _query_data()/_generate_answer()로 SQLite에서 답을 조립한다.
+# 따라서 실패 처리 과정에서 고지서 데이터가 Gemini로 전송될 일이 없다.
+
+# 대체 답변 앞에 붙이는 안내. 실패 원인은 드러내지 않는다.
+FALLBACK_NOTICE = "저장된 고지서 기준으로 안내합니다."
+
+# 대체 답변을 허용하는 실패 원인: 일시적이거나 키가 아직 없는 상황.
+# 401·403(인증·권한 설정 오류)과 404(모델 설정 오류)는 숨기지 않고 원래 안내를 보여준다.
+_FALLBACK_REASONS = frozenset(
+    {
+        gemini_client.REASON_MISSING_KEY,  # API 키 누락
+        gemini_client.REASON_RATE_LIMIT,   # 429
+        gemini_client.REASON_BUSY,         # 408·500·502·503·504 (재시도 소진)
+        gemini_client.REASON_TIMEOUT,      # 타임아웃·연결 실패
+    }
+)
+
+# 로컬 판정 규칙. 위에서부터 먼저 맞는 규칙을 쓴다.
+# 한계: 아래 표현과 그 변형만 잡는다. 맞지 않는 질문은 대체 답변을 만들지 않는다.
+_FALLBACK_RULES = (
+    # 선택 고지서 요약 — 기간·목록 표현이 없을 때만
+    ("bill_summary", re.compile(r"요약|이\s*고지서.*(정보|알려|뭐|어떤)")),
+    ("this_week", re.compile(r"이번\s*주|금주")),
+    ("monthly_total", re.compile(r"이번\s*달|이달|금월")),
+    ("nearest_due", re.compile(r"가장\s*(가까운|급한|빠른)|제일\s*(가까운|급한|빠른)|임박")),
+    ("list_all", re.compile(r"전체|전부|모두|모든|목록|리스트")),
+)
+
+
+def _local_fallback_intent(question: str) -> str | None:
+    """질문을 로컬 규칙으로만 판정한다. 대상이 아니면 None. (외부 호출 없음)
+
+    납부 의무 질문('꼭 내야 해?' 등)은 저장된 정보로 판단할 수 없으므로
+    대체 답변 대상에서 제외한다.
+    """
+    if _OBLIGATION_RE.search(question):
+        return None
+    for intent, pattern in _FALLBACK_RULES:
+        if not pattern.search(question):
+            continue
+        if intent == "bill_summary" and _SCHEDULE_SCOPE_RE.search(question):
+            continue  # '이번 달 요약'은 선택 고지서 요약이 아니다.
+        return intent
+    return None
+
+
+def ask_with_fallback(question: str, *, selected_bill_id=None) -> str:
+    """ask()와 같지만, 일부 API 실패에서는 저장된 고지서로 대신 답한다.
+
+    대체 답변 조건 (모두 만족해야 함):
+    - 실패 원인이 키 누락·429·408/5xx 혼잡·타임아웃/연결 실패
+      (401·403 인증·권한 오류와 404는 대상이 아니다)
+    - 질문이 이번 주 일정·이번 달 합계·가장 가까운 납부기한·전체 목록·
+      선택 고지서 요약 중 하나로 로컬에서 판정됨
+
+    조건에 맞지 않으면 원래 GeminiError를 그대로 다시 발생시킨다.
+    ask()의 동작(오류 전파)은 바꾸지 않는다.
+
+    Raises:
+        GeminiError / GeminiBusyError: 대체 답변 조건에 해당하지 않는 실패.
+    """
+    try:
+        return ask(question, selected_bill_id=selected_bill_id)
+    except gemini_client.GeminiError as error:
+        if error.reason not in _FALLBACK_REASONS:
+            raise
+        intent = _local_fallback_intent(question or "")
+        if intent is None:
+            raise
+        data = _query_data(intent, selected_bill_id=selected_bill_id)
+        answer = _generate_answer(intent, data)
+        return f"{FALLBACK_NOTICE}\n\n{answer}"

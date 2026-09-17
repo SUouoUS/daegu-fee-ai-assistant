@@ -10,10 +10,66 @@ bills 테이블:
 import sqlite3
 import datetime
 import os
+import re
 
 # DB 파일 경로: 프로젝트 루트의 data/bills.db
 _DB_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 _DB_PATH = os.path.join(_DB_DIR, "bills.db")
+
+
+# ── 저장값 해석 (순수 함수) ───────────────────────────────────
+# amount 칼럼은 INTEGER 친화형이지만 "45,200" 같은 문자열은 TEXT로 그대로 남는다.
+# due_date도 형식이 어긋난 문자열이 들어 있을 수 있다. 표시·합산·일정 계산은
+# 아래 두 함수로 해석한 값만 사용한다. 해석할 수 없으면 None(=미확인)으로 보고
+# 값을 추측해 만들지 않는다.
+
+# 일정 조회 SQL의 후보 제한용 패턴. 통과만으로 유효 날짜로 보지 않는다.
+_DUE_DATE_GLOB = "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]"
+_DUE_DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+_AMOUNT_RE = re.compile(r"[0-9]+")
+
+
+def parse_amount(value) -> int | None:
+    """저장된 금액을 0 이상의 정수로 해석한다. 해석할 수 없으면 None.
+
+    - None, bool → None
+    - int → 그대로 (음수는 None)
+    - 정수값 float → int, 소수 float → None
+    - str → 공백·쉼표·'원'을 제거한 뒤 숫자만 남으면 int
+    - 0은 유효한 금액이므로 0을 반환한다.
+    예외를 밖으로 전파하지 않는다.
+    """
+    try:
+        if value is None or isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value if value >= 0 else None
+        if isinstance(value, float):
+            if not value.is_integer() or value < 0:
+                return None
+            return int(value)
+        if isinstance(value, str):
+            cleaned = re.sub(r"\s+", "", value).replace(",", "").replace("원", "")
+            if not _AMOUNT_RE.fullmatch(cleaned):
+                return None
+            return int(cleaned)
+        return None
+    except Exception:  # noqa: BLE001 - 순수 해석 함수는 예외를 전파하지 않는다
+        return None
+
+
+def parse_due_date(value) -> datetime.date | None:
+    """저장된 납부기한을 date로 해석한다. 정확히 YYYY-MM-DD인 실제 날짜만 인정.
+
+    '2026-99-99', '2026-02-31', '2026/09/18', '확인불가', 빈 문자열,
+    뒤에 공백·시각이 붙은 값은 None. 예외를 밖으로 전파하지 않는다.
+    """
+    try:
+        if not isinstance(value, str) or not _DUE_DATE_RE.fullmatch(value):
+            return None
+        return datetime.date.fromisoformat(value)
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _get_connection() -> sqlite3.Connection:
@@ -171,33 +227,46 @@ def get_bill_by_id(bill_id) -> dict | None:
         conn.close()
 
 
-def get_bills_due_this_week(include_paid: bool = False) -> list[dict]:
-    """이번 주(월~일) 납부 기한인 고지서를 반환한다."""
-    today = datetime.date.today()
-    # 월요일 = 0
-    monday = today - datetime.timedelta(days=today.weekday())
-    sunday = monday + datetime.timedelta(days=6)
+def _get_dated_bills(include_paid: bool) -> list[tuple[datetime.date, dict]]:
+    """납부기한이 실제 날짜로 해석되는 고지서를 (date, row) 목록으로 반환한다.
 
+    SQL의 GLOB은 YYYY-MM-DD 모양의 후보만 고르는 용도이고, 유효성은
+    parse_due_date()로 다시 확인한다. 기한 오름차순(같으면 저장 순서)으로 정렬한다.
+    """
     conn = _get_connection()
     try:
         rows = conn.execute(
             f"""
             SELECT * FROM bills
             WHERE {_status_filter(include_paid)}
-              AND due_date IS NOT NULL
-              AND due_date >= ?
-              AND due_date <= ?
+              AND due_date GLOB ?
             ORDER BY due_date ASC
             """,
-            (monday.isoformat(), sunday.isoformat()),
+            (_DUE_DATE_GLOB,),
         ).fetchall()
-        return [dict(row) for row in rows]
     finally:
         conn.close()
 
+    dated = []
+    for row in rows:
+        bill = dict(row)
+        due = parse_due_date(bill.get("due_date"))
+        if due is not None:
+            dated.append((due, bill))
+    return dated
+
+
+def get_bills_due_this_week(include_paid: bool = False) -> list[dict]:
+    """이번 주(월~일) 납부 기한인 고지서를 반환한다. (날짜 객체로 비교)"""
+    today = datetime.date.today()
+    # 월요일 = 0
+    monday = today - datetime.timedelta(days=today.weekday())
+    sunday = monday + datetime.timedelta(days=6)
+    return [bill for due, bill in _get_dated_bills(include_paid) if monday <= due <= sunday]
+
 
 def get_bills_due_this_month(include_paid: bool = False) -> list[dict]:
-    """이번 달 납부 기한인 고지서를 반환한다."""
+    """이번 달 납부 기한인 고지서를 반환한다. (날짜 객체로 비교)"""
     today = datetime.date.today()
     first_day = today.replace(day=1)
     # 다음 달 1일 - 1일 = 이번 달 마지막 날
@@ -205,52 +274,25 @@ def get_bills_due_this_month(include_paid: bool = False) -> list[dict]:
         last_day = today.replace(year=today.year + 1, month=1, day=1) - datetime.timedelta(days=1)
     else:
         last_day = today.replace(month=today.month + 1, day=1) - datetime.timedelta(days=1)
-
-    conn = _get_connection()
-    try:
-        rows = conn.execute(
-            f"""
-            SELECT * FROM bills
-            WHERE {_status_filter(include_paid)}
-              AND due_date IS NOT NULL
-              AND due_date >= ?
-              AND due_date <= ?
-            ORDER BY due_date ASC
-            """,
-            (first_day.isoformat(), last_day.isoformat()),
-        ).fetchall()
-        return [dict(row) for row in rows]
-    finally:
-        conn.close()
+    return [bill for due, bill in _get_dated_bills(include_paid) if first_day <= due <= last_day]
 
 
 def get_total_amount_this_month(include_paid: bool = False) -> int:
-    """이번 달 납부 예정 총 금액을 반환한다."""
+    """이번 달 납부 예정 총 금액을 반환한다. 해석할 수 없는 금액은 합산에서 제외."""
     bills = get_bills_due_this_month(include_paid=include_paid)
-    return sum(b["amount"] for b in bills if b.get("amount") is not None)
+    amounts = (parse_amount(b.get("amount")) for b in bills)
+    return sum(a for a in amounts if a is not None)
 
 
 def get_nearest_due_bill(include_paid: bool = False) -> dict | None:
-    """오늘 이후 가장 가까운 납부 기한의 고지서를 반환한다.
+    """오늘 이후 가장 가까운 납부 기한의 고지서를 반환한다. (날짜 객체로 비교)
     없으면 None.
     """
-    today = datetime.date.today().isoformat()
-    conn = _get_connection()
-    try:
-        row = conn.execute(
-            f"""
-            SELECT * FROM bills
-            WHERE {_status_filter(include_paid)}
-              AND due_date IS NOT NULL
-              AND due_date >= ?
-            ORDER BY due_date ASC
-            LIMIT 1
-            """,
-            (today,),
-        ).fetchone()
-        return dict(row) if row else None
-    finally:
-        conn.close()
+    today = datetime.date.today()
+    for due, bill in _get_dated_bills(include_paid):
+        if due >= today:
+            return bill
+    return None
 
 
 # ── 상태 변경 ─────────────────────────────────────────────────
