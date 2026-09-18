@@ -24,6 +24,7 @@ google-genai SDK는 test_assistant_no_bill_data.py의 가짜 모듈로 대체하
 14. 고지서 0건에서도 질문 UI를 쓸 수 있고, 첫 등록 안내만 표시된다
 15. 0건 안내의 '고지서 등록' 버튼은 등록 화면으로 이동한다 (API 호출 없음)
 16. 완료 고지서만 있으면 미납 없음 안내와 완료 건 보기 안내를 표시한다
+17. 대화 길이에 따라 기록 영역 높이가 content → 340px → 420px로 정해진다
 
 [검증 범위]
 가짜 SDK를 쓰므로 여기서 확인하는 것은 'UI가 언제 몇 번 호출하는가'이며,
@@ -658,6 +659,106 @@ def test_question_ui_available_with_no_bills():
     print("PASS 14: 고지서 0건에서도 입력창·일정 질문 버튼 사용 가능 / 요약만 비활성")
 
 
+def _history_block(at):
+    """대화 기록 컨테이너와 그 높이 설정을 돌려준다. (없으면 (None, None))"""
+    for key in ("ai_history", "ai_history_empty"):
+        block = _find_block(at._tree, key)
+        if block is not None:
+            return key, block.proto.height_config
+    return None, None
+
+
+def test_history_height_steps(bill_id):
+    """17: 대화 길이에 따라 기록 영역 높이가 content → 340 → 420으로 정해진다."""
+    import services.assistant as assistant
+
+    long_answer = (
+        "'긴 답변 예시 고지서' 정보입니다.\n"
+        "• 발급 기관: 대구광역시 수성구 상하수도사업본부\n"
+        "• 납부 금액: 45,200원\n"
+        "• 납부 기한: 2026-09-30 (5일 남음)\n"
+        "• 납부 방법: 위택스, 가상계좌, 금융기관 창구\n"
+        "• 관리 상태: 미납\n"
+        "납부 방법이 저장되어 있지 않습니다. 발급 기관에 확인해 주세요.\n"
+        "※ 관리 상태는 사용자가 표시한 값이며 실제 납부 여부 확인 결과가 아닙니다."
+    )
+    cases = [
+        # (라벨, 대화 기록, 기대 key, 기대 높이)
+        ("대화 없음", [], "ai_history_empty", None),
+        (
+            "짧은 대화",
+            [{"role": "user", "content": "이번 주 일정"},
+             {"role": "assistant", "content": "이번 주에 납부 기한이 있는 미납 고지서가 없습니다."}],
+            "ai_history",
+            "content",
+        ),
+        (
+            # 추정 높이가 content 기준(300px)은 넘고 420px 단계에는 못 미치는 길이
+            "보통 길이",
+            [{"role": "user", "content": "이번 달 합계"},
+             {"role": "assistant", "content": "\n".join(
+                 ["이번 달 납부 예정 금액입니다."] + [f"• 항목 {i} — 10,000원" for i in range(10)]
+             )}],
+            "ai_history",
+            340,
+        ),
+        (
+            "긴 선택 고지서 요약",
+            [{"role": "user", "content": "이 고지서 요약해 줘"},
+             {"role": "assistant", "content": long_answer},
+             {"role": "user", "content": "납부 방법은?"},
+             {"role": "assistant", "content": long_answer}],
+            "ai_history",
+            420,
+        ),
+    ]
+
+    for label, messages, expected_key, expected_height in cases:
+        _CAPTURED.clear()
+        at = _new_app()
+        at.session_state["chat_messages"] = list(messages)
+        at.session_state["selected_bill_id"] = bill_id
+        _run(at)
+
+        key, height = _history_block(at)
+        assert key == expected_key, f"{label}: 컨테이너가 {key}입니다. {expected_key}여야 합니다."
+        if expected_height is None:
+            assert not _find_block(at._tree, "ai_history"), f"{label}: 고정 높이 영역이 생겼습니다."
+        elif expected_height == "content":
+            assert height.use_content, (
+                f"{label}: 내용 높이가 아니라 {height}입니다. 짧은 대화에 빈 공간이 생깁니다."
+            )
+        else:
+            assert height.pixel_height == expected_height, (
+                f"{label}: 높이가 {height.pixel_height}입니다. {expected_height}여야 합니다."
+            )
+            assert height.pixel_height > 280, "기존 고정 높이(280)보다 커야 합니다."
+
+        # 기록 영역 밖의 예시 버튼·입력창은 그대로 있어야 한다.
+        for btn_key in ("ai_ex_week", "ai_ex_month", "ai_ex_bill"):
+            _button(at, btn_key)
+        assert len(at.chat_input) == 1, f"{label}: 입력창이 사라졌습니다."
+        assert len(_CAPTURED) == 0, f"{label}: 기록만 그렸는데 API가 호출되었습니다."
+        print(f"PASS 17: {label} -> {expected_key} / {expected_height or '고정 높이 없음'}")
+
+    # 질문을 보낸 실행에서는 답변 길이를 미리 알 수 없으므로 최소 340px를 쓴다.
+    # (짧은 답변이 와도 그 실행에서는 340px여야 첫 답변이 잘리지 않는다)
+    _CAPTURED.clear()
+    _ok_response("this_week")
+    at = _new_app()
+    at.session_state["selected_bill_id"] = bill_id
+    _run(at)
+    at.chat_input[0].set_value("이번 주에 낼 게 있어?")
+    _run(at)
+
+    key, height = _history_block(at)
+    assert key == "ai_history" and height.pixel_height == 340, (
+        f"질문 전송 직후 높이가 {key}/{height}입니다. 340px여야 합니다."
+    )
+    assert len(_CAPTURED) == 1, f"전송 1회에 API가 {len(_CAPTURED)}회 호출되었습니다."
+    print("PASS 17: 질문 전송 직후(답변 길이 미상) -> 340px")
+
+
 def test_empty_state_register_button():
     """15: 0건 안내의 '고지서 등록' 버튼은 기존 등록 화면으로 이동하며 API를 부르지 않는다."""
     assert not db_module.get_bills(include_paid=True), "이 테스트는 고지서 0건에서 실행해야 합니다."
@@ -743,6 +844,7 @@ def main():
         test_busy_error_shows_curated_message(at)
         test_no_dangling_html_tags(at)
         test_deleted_selection_clears_state(at, id_a)
+        test_history_height_steps(id_a)
         test_question_ui_available_with_no_bills()
         # 14번은 0건 상태에서 질문 1회를 남긴다. 등록 버튼 테스트는 새 세션에서 0건을 확인한다.
         test_empty_state_register_button()

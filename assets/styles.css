@@ -528,12 +528,31 @@ div[class*="st-key-bill_row_sel_"] {
   background-color: var(--bg-subtle);
 }
 
-/* 대화 있음: 고정 높이(app.py _HISTORY_HEIGHT) 안에서 스크롤. 위아래 구분선만 둔다. */
+/* 대화 있음: 짧으면 내용만큼(app.py가 height="content"), 길면 아래 상한까지 늘어난 뒤
+   영역 안에서 스크롤한다. 위아래 구분선만 두고 패널 자체에는 고정 높이를 주지 않는다. */
 .st-key-ai_history {
   gap: 4px;
-  padding: 4px 0;
+  padding: 4px 0 12px; /* 마지막 답변이 아래 구분선에 붙지 않게 여백을 둔다 */
+  max-height: 420px;
+  overflow-y: auto;
   border-top: 1px solid var(--border-color);
   border-bottom: 1px solid var(--border-color);
+  /* 스크롤바는 얇고 차분하게 */
+  scrollbar-width: thin;
+  scrollbar-color: #CBD5E1 transparent;
+}
+
+.st-key-ai_history::-webkit-scrollbar {
+  width: 8px;
+}
+
+.st-key-ai_history::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.st-key-ai_history::-webkit-scrollbar-thumb {
+  background-color: #CBD5E1;
+  border-radius: 4px;
 }
 
 .st-key-ai_history [data-testid="stChatMessage"] {
@@ -639,5 +658,19 @@ div[class*="st-key-bill_row_sel_"] {
     flex-wrap: wrap;
     gap: 10px;
     text-align: left;
+  }
+
+  /* 모바일에서는 대화 기록 상한을 360px로 줄인다. (실측으로 420px → 360px 확인)
+     Streamlit이 감싸는 래퍼는 인라인 height(420px)를 유지해 아래에 빈 틈이 남으므로
+     래퍼 높이도 내용에 맞춘다. */
+  .st-key-ai_history {
+    max-height: 360px;
+  }
+
+  /* 래퍼는 Streamlit이 인라인 height(최대 420px)를 넣는 경우가 있어 !important로 푼다.
+     height:auto라서 짧은 대화에서는 내용 높이 그대로다. */
+  [data-testid="stLayoutWrapper"]:has(> .st-key-ai_history) {
+    height: auto !important;
+    max-height: 360px;
   }
 }

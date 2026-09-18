@@ -7,6 +7,7 @@ app.py
 import datetime
 import hashlib
 import html
+import math
 import os
 import streamlit as st
 
@@ -508,8 +509,40 @@ _EXAMPLE_QUESTIONS = (
     ("bill", "선택 고지서 요약", "이 고지서 요약해 줘", True),
 )
 
-# 대화가 있을 때 기록 영역의 고정 높이(px). 넘치면 영역 안에서 스크롤한다.
-_HISTORY_HEIGHT = 240
+# 대화 기록 영역 높이 단계(px). 짧은 대화는 "content"로 두어 빈 공간을 만들지 않고,
+# 길어지면 아래 값까지만 늘린 뒤 영역 안에서 스크롤한다.
+# 모바일(640px 이하) 상한은 CSS(.st-key-ai_history)가 360px로 줄인다.
+_HISTORY_MEDIUM = 340
+_HISTORY_TALL = 420
+
+# 높이 추정용 상수. 패널 폭 약 300px, 본문 14px 기준으로 한 줄에 약 26자가 들어간다.
+_HISTORY_CHARS_PER_LINE = 26
+_HISTORY_LINE_PX = 24
+_HISTORY_MESSAGE_GAP_PX = 12
+
+
+def _history_height(messages: list[dict], submitted: str | None):
+    """대화 기록 컨테이너의 높이를 고른다. (순수 계산, 세션·DB를 읽지 않는다)
+
+    Returns:
+        "content" (내용만큼) 또는 픽셀 높이(int).
+    """
+    # 이번 실행에서 질문이 제출됐다면 답변 길이를 미리 알 수 없다.
+    # 첫 답변이 과하게 잘리지 않도록 최소 _HISTORY_MEDIUM을 쓴다.
+    minimum = _HISTORY_MEDIUM if submitted else 0
+
+    estimated = 0
+    for message in messages:
+        lines = 0
+        for line in (message.get("content") or "").split("\n"):
+            lines += max(1, math.ceil(len(line) / _HISTORY_CHARS_PER_LINE))
+        estimated += lines * _HISTORY_LINE_PX + _HISTORY_MESSAGE_GAP_PX
+
+    if estimated > _HISTORY_MEDIUM:
+        return _HISTORY_TALL
+    if estimated > 300 or minimum:
+        return max(_HISTORY_MEDIUM, minimum)
+    return "content"
 
 # 채팅 아바타. Streamlit에 내장된 Material Symbols 아이콘이라 외부 의존성이 없다.
 # 색은 CSS(.st-key-ai_history)에서 단색으로 지정한다.
@@ -598,10 +631,13 @@ def render_assistant_panel(selected_bill: dict | None, *, has_any_bill: bool = T
 
         messages = st.session_state["chat_messages"]
         if messages or submitted:
-            # 대화가 있으면 고정 높이로 두고 내부에서 스크롤한다.
+            # 짧은 대화는 내용만큼, 길어지면 상한까지 늘린 뒤 내부에서 스크롤한다.
             # 이번 실행의 질문·답변도 이 컨테이너 안에 그린다.
             history_box = history_slot.container(
-                key="ai_history", height=_HISTORY_HEIGHT, border=False, autoscroll=True
+                key="ai_history",
+                height=_history_height(messages, submitted),
+                border=False,
+                autoscroll=True,
             )
             with history_box:
                 for msg in messages:
