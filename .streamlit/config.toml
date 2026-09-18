@@ -1,0 +1,16 @@
+# Streamlit 앱 설정 (프로젝트 전용)
+# 색상은 assets/styles.css의 토큰과 같은 값을 쓴다. 한쪽만 바꾸면 화면이 어긋난다.
+#   --primary-color #1F4E79 / --bg-main #F5F6F8 / --neutral-bg #F1F5F9
+#   --text-main #182230 / --border-color #E4E7EC
+
+[theme]
+# 기본 테마를 라이트로 고정한다. [theme.dark]를 두지 않으므로 OS가 다크 모드여도
+# 이 테마가 그대로 쓰인다. (사용자가 설정 메뉴에서 직접 바꾸는 것은 막지 않는다)
+base = "light"
+
+primaryColor = "#1F4E79"            # 주요 버튼·선택 강조·위젯 강조(라디오·체크박스)
+backgroundColor = "#F5F6F8"         # 페이지 배경 (카드 흰색은 styles.css가 지정)
+secondaryBackgroundColor = "#F1F5F9"  # 입력창 등 보조 영역 배경
+textColor = "#182230"               # 기본 글자색
+linkColor = "#1F4E79"
+borderColor = "#E4E7EC"

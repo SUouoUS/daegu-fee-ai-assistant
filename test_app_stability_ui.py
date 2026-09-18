@@ -21,6 +21,7 @@ google-genai SDK는 가짜 모듈이므로 실제 API 호출은 없다. DB는 �
 import datetime
 import json
 import os
+import re
 import sys
 import tempfile
 
@@ -196,9 +197,13 @@ def test_amount_display():
 
     at = _new_dashboard()
     values = _texts(at)
-    assert "0원" in values, "0원 고지서가 0원으로 표시되지 않습니다."
-    assert values.count("금액 미확인") == 2, f"금액 미확인은 None·해석 불가 2건이어야 합니다: {values.count('금액 미확인')}"
-    assert "45,200원" in values, "문자열 금액이 45,200원으로 표시되지 않습니다."
+    # 목록의 금액 칸(.bill-amount)에 실제로 찍힌 문자열만 모은다.
+    shown = re.findall(r'<div class="bill-amount">(.*?)</div>', "\n".join(values))
+    assert "0원" in shown, f"0원 고지서가 0원으로 표시되지 않습니다: {shown}"
+    assert shown.count("금액 미확인") == 2, (
+        f"금액 미확인은 None·해석 불가 2건이어야 합니다: {shown}"
+    )
+    assert "45,200원" in shown, f"문자열 금액이 45,200원으로 표시되지 않습니다: {shown}"
     assert any("nearest-card" in t and "45,200원" in t for t in values), "요약 카드 금액 표시 실패"
 
     for bid, expected in ((zero, "0원"), (none, "확인되지 않음"), (text, "45,200원"), (weird, "확인되지 않음")):
@@ -326,7 +331,8 @@ def test_text_input_register_flow():
     assert at.session_state["current_view"] == "dashboard"
     assert at.session_state["selected_bill_id"] == row["id"]
     assert at.session_state["notice_info"] is None and at.session_state["notice_text"] == ""
-    assert "금액 미확인" in _texts(at)
+    shown = re.findall(r'<div class="bill-amount">(.*?)</div>', "\n".join(_texts(at)))
+    assert shown == ["금액 미확인"], f"저장된 고지서의 금액 표시가 다릅니다: {shown}"
     print("PASS 8: 빈 입력 안내 -> 추출 1회 -> 누락 안내·자동 저장 없음 -> None 필드 저장·대시보드 선택")
 
 

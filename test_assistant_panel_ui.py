@@ -128,9 +128,12 @@ _PROJECT_MODULES = (
 _TRACKED_ENV = privacy_test._TRACKED_ENV
 
 # 화면에서 확인할 문구
-PANEL_TITLE = "고지서 AI 비서"
-PANEL_CAPTION = "납부 일정과 선택한 고지서를 물어보세요."
-SELECT_HINT = "목록에서 고지서를 선택해 주세요."
+PANEL_TITLE = "고지서 AI 비서"        # 페이지 상단 서비스명
+PANEL_HEADING = "납부 일정 물어보기"   # 비서 패널 제목
+PANEL_CAPTION = "AI 비서"             # 패널 제목 옆 역할 표시
+# 패널의 상태 안내 (한 상태에 한 문구만 보인다)
+SELECT_HINT = "전체 납부 일정을 물어보거나 고지서를 선택해 주세요."  # 고지서 있음·미선택
+NO_BILL_HINT = "고지서를 등록하면 일정과 금액을 확인할 수 있습니다."   # 저장된 고지서 0건
 
 BILL_A = privacy_test.BILL_A
 BILL_B = privacy_test.BILL_B
@@ -261,11 +264,16 @@ def test_first_render_makes_no_call():
     assert at.session_state["assistant_turn_count"] == 0
 
     texts = _markdown_values(at)
-    assert any(PANEL_TITLE in t for t in texts), "패널 제목이 없습니다."
-    assert any(PANEL_CAPTION in t for t in texts), "패널 설명이 없습니다."
+    assert any(PANEL_TITLE in t for t in texts), "서비스명이 없습니다."
+    assert any(PANEL_HEADING in t for t in texts), "패널 제목이 없습니다."
+    assert any(PANEL_CAPTION in t for t in texts), "패널의 AI 비서 표시가 없습니다."
+    # 고지서가 있고 선택은 없는 상태의 안내가 한 번만 보인다.
     assert any(SELECT_HINT in t for t in texts), "질문 대상 안내가 없습니다."
     assert sum(t.count(SELECT_HINT) for t in texts) == 1, (
         "고지서 선택 안내가 패널 안에 중복 표시됩니다."
+    )
+    assert not any(NO_BILL_HINT in t for t in texts), (
+        "고지서가 있는데 0건 안내가 표시됩니다."
     )
     print("PASS 1: 최초 렌더 API 호출 0회 / 제목·설명·질문 대상 안내 표시")
     return at
@@ -387,6 +395,9 @@ def test_selection_change_makes_no_call(at, bill_id):
     assert not any(SELECT_HINT in t for t in texts), (
         "고지서를 선택했는데 선택 안내가 남아 있습니다."
     )
+    assert not any(NO_BILL_HINT in t for t in texts), (
+        "고지서를 선택했는데 0건 안내가 표시됩니다."
+    )
     print("PASS 4: 고지서 선택 -> API 호출 0회 / 질문 대상 표시 갱신")
 
 
@@ -404,9 +415,18 @@ def test_chat_input_submits_exactly_once(at):
     assert len(at.session_state["chat_messages"]) == before_msgs + 2, (
         "질문과 답변이 각각 1건씩 기록되어야 합니다."
     )
+    # 전송 직후 화면의 아바타 (기본 아바타가 아니라 지정한 단색 아이콘)
+    avatars_after_send = {(m.name, m.avatar) for m in at.chat_message}
+    assert avatars_after_send == {
+        ("user", ":material/person:"),
+        ("assistant", ":material/support_agent:"),
+    }, f"전송 직후 아바타가 다릅니다: {avatars_after_send}"
 
     # 상호작용 없이 다시 실행 -> 같은 질문이 또 처리되면 안 된다.
     _run(at)
+    assert {(m.name, m.avatar) for m in at.chat_message} == avatars_after_send, (
+        "재실행 후 기록의 아바타가 전송 직후와 다릅니다."
+    )
     assert len(_CAPTURED) == 1, (
         f"재실행으로 같은 질문이 중복 처리되었습니다. (누적 {len(_CAPTURED)}회)"
     )
@@ -618,6 +638,12 @@ def test_question_ui_available_with_no_bills():
     assert any("첫 고지서를 등록해 보세요." in t for t in texts), (
         "고지서가 없을 때 목록의 첫 등록 안내가 없습니다."
     )
+    # 패널 안내도 0건 상태 문구여야 한다. (있음·미선택 문구와 구분)
+    assert any(NO_BILL_HINT in t for t in texts), "0건일 때 패널 안내가 없습니다."
+    assert sum(t.count(NO_BILL_HINT) for t in texts) == 1, "0건 안내가 중복 표시됩니다."
+    assert not any(SELECT_HINT in t for t in texts), (
+        "0건인데 '고지서를 선택해 주세요' 안내가 표시됩니다."
+    )
     assert not any("예정된 미납 고지서가 없습니다" in t for t in texts), (
         "고지서가 0건인데 '가장 가까운 납부기한' 빈 카드가 중복 안내로 남아 있습니다."
     )
@@ -661,6 +687,13 @@ def test_paid_only_empty_state():
     assert any("납부완료 고지서도 보기" in t for t in texts), "완료 건 보기 안내가 없습니다."
     assert not any("첫 고지서를 등록해 보세요." in t for t in texts), (
         "완료 고지서가 있는데 첫 등록 안내가 표시되었습니다."
+    )
+    # 목록에서 숨겨져 있어도 저장된 고지서가 있는 상태이므로 0건 안내와 구분한다.
+    assert any(SELECT_HINT in t for t in texts), (
+        "완료 건만 있을 때 패널 안내가 '있음·미선택' 문구가 아닙니다."
+    )
+    assert not any(NO_BILL_HINT in t for t in texts), (
+        "완료 고지서가 있는데 0건 안내가 표시됩니다."
     )
     assert len(at.checkbox) == 1, "완료 건을 볼 수 있는 체크박스가 없습니다."
     try:

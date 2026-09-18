@@ -14,12 +14,19 @@
   --bg-card: #FFFFFF;
   --bg-subtle: #F8FAFC;
   --text-main: #182230;
-  --text-sub: #5B6576;
+  --text-sub: #4E5968;
   --text-disabled: #98A2B3;
   --primary-color: #1F4E79;
   --primary-hover: #16395B;
   --primary-soft: #EEF3FA;
   --border-color: #E4E7EC;
+  /* 상태색: 기한 경고(빨강) / 납부완료(초록) / 그 밖(회색). 문구와 함께만 쓴다. */
+  --danger-text: #B42318;
+  --danger-bg: #FEF3F2;
+  --success-text: #027A48;
+  --success-bg: #ECFDF3;
+  --neutral-text: #475467;
+  --neutral-bg: #F1F5F9;
   --font-family: Pretendard, "Noto Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
   --radius-card: 8px;
   --radius-control: 8px;
@@ -71,6 +78,7 @@
   > .ai-panel-title,
   > .ai-target,
   > .ai-target-empty,
+  > .bill-amount,
   .register-desc
 ) {
   margin-bottom: 0;
@@ -83,7 +91,7 @@
 
 /* ── 버튼 ─────────────────────────────────────────────────── */
 .stButton > button {
-  min-height: 40px;
+  min-height: 38px;
   padding: 0 16px;
   border-radius: var(--radius-control);
   font-size: 14px;
@@ -146,7 +154,7 @@
 .stMarkdown h1.gov-header-title {
   margin: 0;
   padding: 0;
-  font-size: 30px;
+  font-size: 28px;
   font-weight: 700;
   line-height: 1.3;
   color: var(--text-main);
@@ -298,10 +306,45 @@ div[data-testid="stColumn"]:has(.st-key-dash_right) {
   word-break: keep-all;
 }
 
+/* 헤더의 금액 칸은 본문 금액과 같은 오른쪽 정렬로 맞춘다.
+   (실측: 헤더 금액 칸 오른쪽 끝과 행 금액 오른쪽 끝이 1px 이내로 맞는다) */
+.bill-list-header > div:nth-child(2) {
+  text-align: right;
+}
+
+/* 긴 제목이 금액·기한·선택 버튼을 밀지 않도록 목록 카드 안의 열만 min-width를 푼다.
+   (등록 화면이나 AI 예시 버튼의 열 배치에는 영향을 주지 않는다)
+   641px 이상에서만 적용한다. 좁은 화면에서는 min-width:auto를 그대로 두어야
+   Streamlit이 행을 1열로 쌓고 선택 버튼이 눌리지 않는다. */
+@media (min-width: 641px) {
+  .st-key-bill_list_card div[data-testid="stColumn"] {
+    min-width: 0;
+  }
+}
+
 /* 행 구분선. bill_row_ 와 bill_row_sel_ 모두에 적용된다. */
 div[class*="st-key-bill_row_"] {
-  padding: 4px 10px 12px;
+  padding: 8px 10px;
   border-bottom: 1px solid var(--border-color);
+}
+
+/* 금액은 오른쪽 정렬 + 등폭 숫자로 자릿수를 비교하기 쉽게 한다. */
+.bill-amount {
+  font-size: 15px;
+  font-weight: 600;
+  text-align: right;
+  color: var(--text-main);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.bill-due {
+  margin-top: 2px;
+  font-size: 13px;
+  text-align: right;
+  color: var(--text-sub);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 /* 긴 고지서명·기관명은 열 안에서 줄바꿈한다. */
@@ -315,7 +358,7 @@ div[class*="st-key-bill_row_"] [data-testid="stCaptionContainer"] {
    이전 행의 강조는 자동으로 해제된다. */
 div[class*="st-key-bill_row_sel_"] {
   background-color: var(--primary-soft);
-  box-shadow: inset 3px 0 0 var(--primary-color);
+  box-shadow: inset 2px 0 0 var(--primary-color);
   border-radius: 6px;
 }
 
@@ -409,18 +452,18 @@ div[class*="st-key-bill_row_sel_"] {
 }
 
 .status-badge.paid {
-  background-color: #ECFDF3;
-  color: #027A48;
+  background-color: var(--success-bg);
+  color: var(--success-text);
 }
 
 .status-badge.urgent {
-  background-color: #FEF3F2;
-  color: #B42318;
+  background-color: var(--danger-bg);
+  color: var(--danger-text);
 }
 
 .status-badge.unpaid {
-  background-color: #F1F5F9;
-  color: #475467;
+  background-color: var(--neutral-bg);
+  color: var(--neutral-text);
 }
 
 /* ── AI 비서 패널 ────────────────────────────────────────── */
@@ -429,16 +472,24 @@ div[class*="st-key-bill_row_sel_"] {
 }
 
 .ai-panel-title {
-  font-size: 19px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 18px;
   font-weight: 700;
   line-height: 1.35;
   color: var(--text-main);
 }
 
-.ai-panel-desc {
-  margin-top: 2px;
-  font-size: 14px;
-  color: var(--text-sub);
+/* 역할 표시. 장식이 아니라 이 영역이 AI 답변이라는 안내다. */
+.ai-panel-badge {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background-color: var(--primary-soft);
+  color: var(--primary-color);
+  font-size: 12px;
+  font-weight: 600;
 }
 
 .ai-target {
@@ -489,6 +540,35 @@ div[class*="st-key-bill_row_sel_"] {
   padding: 6px 2px;
   gap: 10px;
   background-color: transparent;
+}
+
+/* 아바타는 app.py가 지정한 Material Symbols 아이콘(stChatMessageAvatarCustom)이다.
+   기본 비서 아바타의 주황 배경 대신 단색으로 두어 상태색(경고·완료)과 섞이지 않게 한다.
+   역할은 Streamlit이 붙이는 aria-label로 구분한다. (사용자 회색 / 비서 남색) */
+.st-key-ai_history [data-testid="stChatMessageAvatarCustom"] {
+  width: 28px;
+  height: 28px;
+  background-color: var(--neutral-bg);
+  color: var(--text-sub);
+  box-shadow: none;
+}
+
+.st-key-ai_history
+  [data-testid="stChatMessage"]:has([aria-label="Chat message from assistant"])
+  [data-testid="stChatMessageAvatarCustom"] {
+  background-color: var(--primary-soft);
+  color: var(--primary-color);
+}
+
+.st-key-ai_history [data-testid="stChatMessageAvatarCustom"] [data-testid="stIconMaterial"] {
+  font-size: 18px;
+}
+
+/* 답변은 줄 단위로 조립된다(항목마다 개행). 마크다운은 한 줄 개행을 공백으로 합치므로
+   답변 문장을 바꾸지 않고 표시할 때만 줄바꿈을 살린다. */
+.st-key-ai_history .stMarkdown p {
+  white-space: pre-line;
+  line-height: 1.55;
 }
 
 .st-key-ai_history .stMarkdown {

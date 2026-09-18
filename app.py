@@ -285,8 +285,13 @@ def render_notice_list(bills: list[dict], *, has_any_bill: bool = True):
                         st.markdown(f"**{title}**")
                     st.caption(agency)
                 with c2:
-                    st.write(amount_str)
-                    st.caption(due_date)
+                    # 금액·기한은 오른쪽 정렬로 자릿수를 비교하기 쉽게 둔다.
+                    # (금액 0원과 '금액 미확인' 구분, 기한 표기 정책은 그대로)
+                    st.markdown(
+                        f'<div class="bill-amount">{amount_str}</div>'
+                        f'<div class="bill-due">{due_date}</div>',
+                        unsafe_allow_html=True,
+                    )
                 with c3:
                     st.markdown(f'<span class="{badge_cls}">{dday_text}</span>', unsafe_allow_html=True)
                 with c4:
@@ -491,7 +496,7 @@ def render_dashboard_view():
                 render_notice_detail(selected_bill)
         with col_side:
             with st.container(key="dash_right"):
-                render_assistant_panel(selected_bill)
+                render_assistant_panel(selected_bill, has_any_bill=has_any_bill)
 
 
 # ── AI 비서 패널 (대시보드 오른쪽 열) ────────────────────────
@@ -506,8 +511,20 @@ _EXAMPLE_QUESTIONS = (
 # 대화가 있을 때 기록 영역의 고정 높이(px). 넘치면 영역 안에서 스크롤한다.
 _HISTORY_HEIGHT = 240
 
+# 채팅 아바타. Streamlit에 내장된 Material Symbols 아이콘이라 외부 의존성이 없다.
+# 색은 CSS(.st-key-ai_history)에서 단색으로 지정한다.
+_AVATARS = {
+    "user": ":material/person:",
+    "assistant": ":material/support_agent:",
+}
 
-def render_assistant_panel(selected_bill: dict | None):
+
+def _chat_message(role: str):
+    """역할에 맞는 아바타로 채팅 말풍선을 연다. (기록 렌더와 전송 직후 렌더 공통)"""
+    return st.chat_message(role, avatar=_AVATARS.get(role))
+
+
+def render_assistant_panel(selected_bill: dict | None, *, has_any_bill: bool = True):
     """대시보드에 상주하는 AI 비서 패널.
 
     예시 버튼과 직접 입력 모두 _handle_question() 하나만 거치며,
@@ -519,17 +536,19 @@ def render_assistant_panel(selected_bill: dict | None):
 
     Args:
         selected_bill: 선택된 고지서 dict. 없으면 None.
+        has_any_bill: 상태와 무관하게 저장된 고지서가 한 건이라도 있는지.
+            안내 문구에만 쓴다. (완료 건만 있는 상태와 0건을 구분한다)
     """
     selected_bill_id = selected_bill["id"] if selected_bill else None
 
     with st.container(key="ai_panel", border=True):
         st.markdown(
-            '<div class="ai-panel-title">고지서 AI 비서</div>'
-            '<div class="ai-panel-desc">납부 일정과 선택한 고지서를 물어보세요.</div>',
+            '<div class="ai-panel-title">납부 일정 물어보기'
+            '<span class="ai-panel-badge">AI 비서</span></div>',
             unsafe_allow_html=True,
         )
 
-        # 질문 대상 표시 — 선택 안내는 이곳 한 군데에만 둔다.
+        # 상태 안내는 이곳 한 군데에만 둔다. (0건 / 있음·미선택 / 선택됨)
         if selected_bill:
             target = html.escape(selected_bill.get("title") or "제목 없는 고지서")
             st.markdown(
@@ -538,9 +557,15 @@ def render_assistant_panel(selected_bill: dict | None):
                 f'<span class="ai-target-name">{target}</span></div>',
                 unsafe_allow_html=True,
             )
+        elif has_any_bill:
+            # 완료 건만 남아 목록이 비어 보여도 저장된 고지서는 있는 상태다.
+            st.markdown(
+                '<div class="ai-target-empty">전체 납부 일정을 물어보거나 고지서를 선택해 주세요.</div>',
+                unsafe_allow_html=True,
+            )
         else:
             st.markdown(
-                '<div class="ai-target-empty">목록에서 고지서를 선택해 주세요.</div>',
+                '<div class="ai-target-empty">고지서를 등록하면 일정과 금액을 확인할 수 있습니다.</div>',
                 unsafe_allow_html=True,
             )
 
@@ -580,7 +605,7 @@ def render_assistant_panel(selected_bill: dict | None):
             )
             with history_box:
                 for msg in messages:
-                    with st.chat_message(msg["role"]):
+                    with _chat_message(msg["role"]):
                         st.markdown(msg["content"])
         else:
             # 대화가 없으면 빈 상자 대신 안내 한 줄만 둔다.
@@ -603,10 +628,11 @@ def _handle_question(question: str, selected_bill_id, history_box):
 
     st.session_state["chat_messages"].append({"role": "user", "content": question})
     with history_box:
-        with st.chat_message("user"):
+        # 기록 렌더와 같은 아바타를 쓴다. (전송 직후 화면과 재실행 후 화면이 같아야 한다)
+        with _chat_message("user"):
             st.markdown(question)
 
-        with st.chat_message("assistant"):
+        with _chat_message("assistant"):
             with st.spinner("답변을 생성 중입니다…"):
                 try:
                     answer = assistant_ask(question, selected_bill_id=selected_bill_id)
